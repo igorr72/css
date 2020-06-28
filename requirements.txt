@@ -1,2 +1,1 @@
-# no external python packages required!
-# we rely only on biult-in packages in python3
+pytest

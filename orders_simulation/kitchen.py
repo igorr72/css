@@ -6,17 +6,8 @@ from queue import Queue
 from threading import Thread, Lock
 from typing import List, Dict
 
-from kitchendata import Order, Config
-from orderstate import OrderState
-
-# Collecting all dispatch threads to wait for them before closing main thread
-dispatch_queue = Queue()
-
-# lock will protect modification of a global data structure orders_state
-lock = Lock()
-
-# Each order will have an individual state, protected by an individual lock
-orders_state = {}
+from .kitchendata import Order, Config
+from .orderstate import OrderState
 
 def set_logger(debug_level: int) -> None:
     """Configure logger for kitchen orders troubleshooting"""
@@ -41,6 +32,15 @@ class Kitchen:
         self.orders = orders
         self.config = config
 
+        # Collecting all dispatch threads to wait for them before closing main thread
+        self.dispatch_queue = Queue()
+
+        # lock will protect modification of a global data structure orders_state
+        self.lock = Lock()
+
+        # Each order will have an individual state, protected by an individual lock
+        self.orders_state = {}
+
 
     def input_delay(self) -> float:
         """Calculates a delay for a single order"""
@@ -64,13 +64,13 @@ class Kitchen:
     def fulfill_order(self, order_num: int, order: Order) -> None:
         """Main logic: create new state for the order; dispatch courier"""
 
-        with lock:
+        with self.lock:
             self.logger.info(f"with global lock: add new OrderState for order {order_num}")
-            orders_state[order_num] = OrderState(order, time.time())
+            self.orders_state[order_num] = OrderState(order, time.time())
         
         courier = Thread(target=self.dispatch_order, args=(order_num,), name=f"dispatch_order_{order_num}", daemon=True)
         courier.start()
-        dispatch_queue.put(courier) # will wait for that thread to finish
+        self.dispatch_queue.put(courier) # will wait for that thread to finish
 
 
     def dispatch_order(self, order_num: int) -> None:
@@ -80,9 +80,9 @@ class Kitchen:
         self.logger.info(f"dispatching courier for order_num {order_num} with delay {delay}")
         time.sleep(delay)
 
-        with lock:
+        with self.lock:
             self.logger.info(f"with global lock: remove OrderState for order {order_num}")
-            del orders_state[order_num]
+            del self.orders_state[order_num]
 
 
     def run(self, debug_level: int = 0) -> None:
@@ -104,10 +104,9 @@ class Kitchen:
         time.sleep(delay)
         
         # waiting for all dispatched couriers to finish
-        while not dispatch_queue.empty():
-            t = dispatch_queue.get()
+        while not self.dispatch_queue.empty():
+            t = self.dispatch_queue.get()
             self.logger.debug(f"waiting for {t} to finish")
             t.join()
 
-        self.logger.warning(f"Finish processing: order count={len(orders_state)}")
-        assert len(orders_state) == 0
+        self.logger.warning(f"Finish processing: remaining orders={len(self.orders_state)}")

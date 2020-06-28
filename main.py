@@ -3,8 +3,8 @@
 import argparse
 import sys
 
-from kitchendata import load_orders, load_config
-from kitchen import Kitchen
+from orders_simulation.kitchendata import load_orders, load_config
+from orders_simulation.kitchen import Kitchen
 
 
 def parse_cli_args():

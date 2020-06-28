@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from kitchendata import Order
+from .kitchendata import Order
 
 @dataclass
 class OrderState:

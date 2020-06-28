@@ -21,8 +21,8 @@ class Config:
     capacity_frozen: int
     capacity_overflow: int
     intake_orders_per_sec: int
-    pickup_min_sec: int
-    pickup_max_sec: int
+    pickup_min_sec: float
+    pickup_max_sec: float
 
 
 def load_json(filename: str, errors_sink):
