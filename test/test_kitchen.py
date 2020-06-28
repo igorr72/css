@@ -79,7 +79,7 @@ def test_dispatch_order():
     
     accuracy = 0.1
     min_sec = 0.2
-    max_sec = min_sec + 2*accuracy
+    max_sec = min_sec + 2 * accuracy
 
     test_kitchen = Kitchen(orders, config)
 
@@ -104,7 +104,7 @@ def test_dispatch_order():
 
 def test_run():
     """Make sure all orders were processed/dispatched"""
-    
+
     test_kitchen = Kitchen(orders, config)
     test_kitchen.run()
 

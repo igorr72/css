@@ -90,17 +90,15 @@ class Kitchen:
 
         set_logger(debug_level)
 
-        self.logger.debug(f"Orders: {self.orders}")
         self.logger.info(f"Config: {self.config}")
-
         self.logger.warning(f"Start processing: order count={len(self.orders)}")
 
         # consume from order queue at given rate
         feed = Thread(target=self.accept_orders, name="accept_orders", daemon=True)
         feed.start()
 
-        delay = 3 * self.input_delay()
-        self.logger.info(f"waiting for {delay} sec before checking dispatch queue")
+        delay = 2 * self.input_delay()
+        self.logger.info(f"waiting for two first orders before checking dispatch queue")
         time.sleep(delay)
         
         # waiting for all dispatched couriers to finish
