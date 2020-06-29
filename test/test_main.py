@@ -23,7 +23,7 @@ def test_run_main_ok(caplog):
         try:
             main()
             c = Counter([r.levelname for r in caplog.records])
-            assert c["WARNING"] == 2 # start & finish messages
+            assert c["WARNING"] == 3 # start, finish, stats messages
             assert c["INFO"] == 0
             assert c["DEBUG"] == 0
             assert c["ERROR"] == 0
@@ -62,7 +62,7 @@ def test_run_main_debug(caplog):
             caplog.set_level(logging.DEBUG)
             main()
             c = Counter([r.levelname for r in caplog.records])
-            assert c["WARNING"] == 2 # start & finish messages
+            assert c["WARNING"] == 3 # start, finish, stats messages
             assert c["INFO"] > 0
             assert c["DEBUG"] > 0
             assert c["ERROR"] == 0

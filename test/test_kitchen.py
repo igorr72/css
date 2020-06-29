@@ -67,29 +67,31 @@ def test_fulfill_order():
     assert test_kitchen.dispatch_queue.empty()
     assert test_kitchen.orders_state == {}
 
-    test_kitchen.fulfill_order(25, object)
+    order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    test_kitchen.fulfill_order(25, order)
 
     # not empty
     assert not test_kitchen.dispatch_queue.empty()
     assert 25 in test_kitchen.orders_state
     assert isinstance(test_kitchen.orders_state[25], OrderState)
 
-def test_dispatch_order():
+def test_dispatch_order_ok():
     """Test the delay was in given range & state was removed (order picked up)"""
     
-    accuracy = 0.1
-    min_sec = 0.2
-    max_sec = min_sec + 2 * accuracy
-
     test_kitchen = Kitchen(orders, config)
 
-    test_kitchen.config.pickup_min_sec = min_sec
-    test_kitchen.config.pickup_max_sec = max_sec
+    test_kitchen.config.pickup_min_sec = 0.2
+    test_kitchen.config.pickup_max_sec = 0.4
+
+    accuracy = 0.1
 
     # empty before
     assert test_kitchen.orders_state == {}
+    assert test_kitchen.stats_waste == []
 
-    test_kitchen.orders_state[25] = object
+    order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    state = OrderState(order, order_recieved=time.time(), wasted=False)
+    test_kitchen.orders_state[25] = state
 
     start = time.time()
     test_kitchen.dispatch_order(25)
@@ -97,10 +99,43 @@ def test_dispatch_order():
 
     # empty after
     assert test_kitchen.orders_state == {}
+    assert test_kitchen.stats_waste == []
 
     # delay within given range
     assert elapsed < test_kitchen.config.pickup_max_sec + accuracy
     assert elapsed > test_kitchen.config.pickup_min_sec - accuracy
+
+
+def test_dispatch_order_wasted():
+    """Make sure we collected statistics about wasted order"""
+
+    test_kitchen = Kitchen(orders, config)
+
+    test_kitchen.config.pickup_min_sec = 0.01
+    test_kitchen.config.pickup_max_sec = 0.02
+
+    # empty before
+    assert test_kitchen.orders_state == {}
+    assert test_kitchen.stats_waste == []
+
+    now = time.time()
+    state = OrderState(object, order_recieved=now, wasted=True)
+    test_kitchen.orders_state[33] = state
+
+    test_kitchen.dispatch_order(33)
+
+    # after: orders are empty, but stats_waste is not
+    assert test_kitchen.orders_state == {}
+    assert len(test_kitchen.stats_waste) == 1
+
+    # Checking that actual data stored in stats_waste
+    assert test_kitchen.stats_waste[0].order_num == 33
+    assert test_kitchen.stats_waste[0].order_state == state
+
+    # execution speed as expected (courier dispatched -> delay -> courier arrived)
+    arrived_at = test_kitchen.stats_waste[0].courier_arrived_at
+    assert abs(arrived_at - now) < 2 * test_kitchen.config.pickup_max_sec
+
 
 def test_run():
     """Make sure all orders were processed/dispatched"""

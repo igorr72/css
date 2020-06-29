@@ -4,10 +4,10 @@ import logging
 
 from queue import Queue
 from threading import Thread, Lock
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
-from .kitchendata import Order, Config
-from .orderstate import OrderState
+from .kitchendata import Order, Config, shelf_types
+from .orderstate import OrderState, Waste
 
 def set_logger(debug_level: int) -> None:
     """Configure logger for kitchen orders troubleshooting"""
@@ -38,8 +38,14 @@ class Kitchen:
         # lock will protect modification of a global data structure orders_state
         self.lock = Lock()
 
-        # Each order will have an individual state, protected by an individual lock
-        self.orders_state = {}
+        # Keep individual states for each order
+        self.orders_state: Dict[int, OrderState] = {}
+
+        # Keep statistics for wasted orders
+        self.stats_waste: List[Waste] = []
+
+        # Counters for each shelf
+        self.shelves: Dict[str, int] = { shelf: 0 for shelf in shelf_types }
 
 
     def input_delay(self) -> float:
@@ -81,7 +87,14 @@ class Kitchen:
         time.sleep(delay)
 
         with self.lock:
-            self.logger.info(f"with global lock: remove OrderState for order {order_num}")
+            state = self.orders_state[order_num]
+            if state.wasted:
+                self.logger.error(f"order {order_num} is a waste: delivery failed")
+                self.stats_waste.append(Waste(order_num, time.time(), state))
+            else:
+                self.logger.info(f"order {order_num} delivered successfully; value: {state.value()}")
+                self.logger.debug(f"order {order_num} state: {state}")
+
             del self.orders_state[order_num]
 
 
@@ -108,3 +121,4 @@ class Kitchen:
             t.join()
 
         self.logger.warning(f"Finish processing: remaining orders={len(self.orders_state)}")
+        self.logger.warning(f"Stats: wasted orders={len(self.stats_waste)}")
