@@ -1,0 +1,13 @@
+{
+    "capacity": {
+      "hot": 10,
+      "cold": 10,
+      "frozen": 10,
+      "overflow": 15,
+      "FOOBAR": 25
+    },
+    "intake_orders_per_sec": 100,
+    "pickup_min_sec": 0.2,
+    "pickup_max_sec": 0.6
+  }
+  
