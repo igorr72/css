@@ -24,6 +24,18 @@ def set_logger(debug_level: int) -> None:
         level = level
     )
 
+def min_ttl(ttl_orders: List[Tuple[int, float]]) -> int:
+    """Finds and retunrs the order number with smallest TTL (time-to-live)"""
+
+    order_num, min_ttl = ttl_orders[0]
+
+    for num, ttl in ttl_orders:
+        if ttl < min_ttl:
+            min_ttl = ttl
+            order_num = num
+
+    return order_num
+
 class Kitchen:
     """Kitchen is the main class that processes all orders and manages all async threads"""
 
@@ -67,12 +79,38 @@ class Kitchen:
             fulfill.start()
 
 
+    def make_room(self, desired_shelf: str) -> str:
+        """Returns a shelf name where to put a new order. This function might modify
+        the other orders states to make room if all shelfs are full"""
+
+        if self.shelves[desired_shelf] < self.config.capacity[desired_shelf]:
+            self.shelves[desired_shelf] += 1
+            return desired_shelf
+
+        if self.shelves["overflow"] < self.config.capacity["overflow"]:
+            self.shelves["overflow"] += 1
+            return "overflow"
+
+        ttl_orders = [
+            (order_num, state.pickup_ttl(self.config.pickup_max_sec))
+            for order_num, state in self.orders_state.items() if state.shelf == "overflow"
+        ]
+
+        order_num = min_ttl(ttl_orders)
+
+        # throw away the order with smallest TTL
+        self.orders_state[order_num].wasted = True
+
+        return "overflow"
+
+
     def fulfill_order(self, order_num: int, order: Order) -> None:
         """Main logic: create new state for the order; dispatch courier"""
 
         with self.lock:
             self.logger.info(f"with global lock: add new OrderState for order {order_num}")
-            self.orders_state[order_num] = OrderState(order, time.time())
+            shelf = self.make_room(order.temp)
+            self.orders_state[order_num] = OrderState(order, time.time(), shelf=shelf)
         
         courier = Thread(target=self.dispatch_order, args=(order_num,), name=f"dispatch_order_{order_num}", daemon=True)
         courier.start()

@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from threading import Lock
 from collections import Counter
 
-from orders_simulation.kitchen import Kitchen, set_logger
+from orders_simulation.kitchen import Kitchen, set_logger, min_ttl
 from orders_simulation.kitchendata import load_orders, load_config, Order
 from orders_simulation.orderstate import OrderState
 
@@ -27,11 +27,18 @@ def test_input_delay():
 
     assert test_kitchen.input_delay() == 0.2 # 1.0 / 5
 
+def test_min_ttl():
+    arr = [(2, 0.1)]
+    assert min_ttl(arr) == 2
+
+    arr.append((3, -0.1))
+    assert min_ttl(arr) == 3
 
 def test_accept_orders():
     """Testing two things: input rate(exec time) & total number of orders"""
 
     test_kitchen = Kitchen(orders, config)
+    test_kitchen.config.intake_orders_per_sec = 10
 
     lock = Lock() # just in case when input rate is very high...    
     called_count = 0
@@ -54,6 +61,32 @@ def test_accept_orders():
     assert abs(elapsed - expected) < accuracy
 
 
+def test_make_room():
+    test_kitchen = Kitchen(orders, config)
+
+    assert test_kitchen.shelves["hot"] == 0 # before
+    assert test_kitchen.make_room("hot") == "hot"
+    assert test_kitchen.shelves["hot"] == 1 # after
+
+    # simulate overflow of "hot" shelf
+    test_kitchen.shelves["hot"] = test_kitchen.config.capacity["hot"]
+
+    assert test_kitchen.shelves["overflow"] == 0 # before
+    assert test_kitchen.make_room("hot") == "overflow"
+    assert test_kitchen.shelves["overflow"] == 1 # after
+
+    # simulate overflow of "overflow" shelf
+    test_kitchen.shelves["overflow"] = test_kitchen.config.capacity["overflow"]
+
+    # overflow shelf supposed to have at least one order (it should be full in fact)
+    order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    test_kitchen.orders_state[30] = OrderState(order, time.time(), shelf="overflow")
+
+    assert test_kitchen.orders_state[30].wasted == False # before make_room
+    assert test_kitchen.make_room("hot") == "overflow"
+    assert test_kitchen.orders_state[30].wasted == True # after make_room
+
+
 def test_fulfill_order():
     """Test two things: new Order state created; new dispatch_order issued"""
 
@@ -74,6 +107,7 @@ def test_fulfill_order():
     assert not test_kitchen.dispatch_queue.empty()
     assert 25 in test_kitchen.orders_state
     assert isinstance(test_kitchen.orders_state[25], OrderState)
+
 
 def test_dispatch_order_ok():
     """Test the delay was in given range & state was removed (order picked up)"""
