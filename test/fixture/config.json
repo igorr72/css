@@ -1,8 +1,10 @@
 {
-  "capacity_hot": 10,
-  "capacity_cold": 10,
-  "capacity_frozen": 10,
-  "capacity_overflow": 15,
+  "capacity": {
+    "hot": 10,
+    "cold": 10,
+    "frozen": 10,
+    "overflow": 15
+  },
   "intake_orders_per_sec": 100,
   "pickup_min_sec": 0.2,
   "pickup_max_sec": 0.6

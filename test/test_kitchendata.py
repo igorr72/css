@@ -61,6 +61,15 @@ def test_load_orders_wrong_list():
     output.write.assert_called()
     assert "Can't convert json data into" in str(output.mock_calls[0])
 
+def test_load_orders_wrong_temp():
+    output = Mock()
+    orders_path = cur_dir.joinpath("fixture", "orders_wrong_temp.json")
+    data = kitchendata.load_orders(orders_path, output)
+
+    assert data == None
+    output.write.assert_called()
+    assert "unexpected temperature" in str(output.mock_calls[0])
+
 # ========== load_config ==========
 def test_load_config_ok():
     output = Mock()
@@ -78,3 +87,12 @@ def test_load_config_wrong_config():
     assert data == None
     output.write.assert_called()
     assert "Can't convert json data into" in str(output.mock_calls[0])
+
+def test_load_config_wrong_shelf():
+    output = Mock()
+    config_path = cur_dir.joinpath("fixture", "config_wrong_shelf.json")
+    data = kitchendata.load_config(config_path, output)
+
+    assert data == None
+    output.write.assert_called()
+    assert "expected shelves" in str(output.mock_calls[0])

@@ -1,9 +1,10 @@
 import json
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Dict, Optional
 from pathlib import Path
 
+shelf_types = ["hot", "cold", "frozen", "overflow"]
 
 @dataclass
 class Order:
@@ -16,10 +17,7 @@ class Order:
 
 @dataclass
 class Config:
-    capacity_hot: int
-    capacity_cold: int
-    capacity_frozen: int
-    capacity_overflow: int
+    capacity: Dict[str, int]
     intake_orders_per_sec: int
     pickup_min_sec: float
     pickup_max_sec: float
@@ -57,6 +55,13 @@ def load_orders(filename: str, errors_sink) -> Optional[List[Order]]:
     try:
         obj_list = [Order(**order) for order in orders]
 
+        allowed_shelves = set([t for t in shelf_types if t != "overflow"])
+        temps = set([order.temp for order in obj_list])
+
+        if not temps.issubset(allowed_shelves):
+            print(f"load_orders: unexpected temperature(s): {temps.difference(allowed_shelves)}", file=errors_sink)
+            return None
+
     except Exception as e:
         print(f"load_orders: Can't convert json data into {Order}: {e}", file=errors_sink)
         return None
@@ -73,6 +78,13 @@ def load_config(filename: str, errors_sink) -> Optional[Config]:
 
     try:
         cfg = Config(**config)
+
+        expected = sorted(shelf_types)
+        configured = sorted(list(cfg.capacity.keys()))
+
+        if expected != configured:
+            print(f"load_config: expected shelves {expected}; got {configured}", file=errors_sink)
+            return None
 
     except Exception as e:
         print(f"load_config: Can't convert json data into {Config}: {e}", file=errors_sink)
