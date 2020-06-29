@@ -1,51 +1,67 @@
 import time
 
 from dataclasses import dataclass
+from typing import List
 
 from .kitchendata import Order
+
+
+@dataclass
+class ShelfHistory:
+    shelf: str
+    added_at: float = time.time()
+    removed_at: float = None
+
 
 @dataclass
 class OrderState:
     order: Order
-    order_recieved: float
-    wasted: bool = False
-    shelf: str = None
+    history: List[ShelfHistory]
 
-    def decay_modifier(self) -> int:
-        if self.order.temp == self.shelf:
-            return 1 # shelf where it should be
+    def decay_modifiers(self) -> List[int]:
+        return [
+            1 if self.order.temp == hist.shelf else 2
+            for hist in self.history
+        ]
 
-        return 2 # overflow shelf
-
-    def decay_rate(self) -> float:
+    def decay_rates(self) -> float:
         """Sub-expression in calculating the value of the shelved order"""
 
-        return self.order.decayRate * self.decay_modifier()
+        return [self.order.decayRate * modifier for modifier in self.decay_modifiers()]
 
-    def age(self) -> float:
+    def ages(self) -> float:
         """Sub-expression in calculating the age of the shelved order"""
-
-        return time.time() - self.order_recieved
+        res = []
+        for hist in self.history:
+            removed_at = hist.removed_at if hist.removed_at else time.time()
+            res.append(removed_at - hist.added_at)
+        return res
 
     def value(self) -> float:
-        """Calculate the value for the order on a shelf"""
+        """Calculate the value for the order for entire shelf history"""
 
-        return 1.0 - self.decay_rate() * self.age() / self.order.shelfLife
+        decays = [a * d for a, d in zip(self.ages(), self.decay_rates())]
+
+        return 1.0 - sum(decays) / self.order.shelfLife
+
+    def ttl(self) -> float:
+        """Calculate TTL (time to live) if order remains on current shelf"""
+
+        # Calculate TTL (time to live) when order's value would become zero
+        # a1*d1 + a2*d2 + a3*d3 == shelfLife
+        # a3(aka ttl) = (shelfLife - a1*d1 - a2*d2) / d3
+
+        ages = self.ages()
+        decay_rates = self.decay_rates()
+
+        prior_decays = [a * d for a, d in zip(ages[:-1], decay_rates[:-1])]
+
+        return (self.order.shelfLife - sum(prior_decays)) / decay_rates[-1]
 
     def pickup_ttl(self, pickup_max_sec: int) -> float:
-        """Difference between order TTL and MAX time to pickup"""
-
-        # Calculate TTL (time to live) when order value becomes zero
-        # self.decay_rate() * age / self.order.shelfLife == 1
-        ttl = self.order.shelfLife / self.decay_rate()
+        """Difference between order TTL and worst case pickup time"""
 
         # Use the information about dispatch (max time for courier to arrive)
-        max_time_to_pickup = pickup_max_sec - self.age()
+        max_time_to_pickup = pickup_max_sec - sum(self.ages())
 
-        return ttl - max_time_to_pickup
-
-@dataclass
-class Waste:
-    order_num: int
-    courier_arrived_at: float
-    order_state: OrderState
+        return self.ttl() - max_time_to_pickup

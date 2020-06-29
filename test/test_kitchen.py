@@ -3,88 +3,172 @@ import sys
 import pathlib
 import time
 import logging
+import math
 
 from unittest.mock import Mock, patch
 from threading import Lock
 from collections import Counter
 
 from orders_simulation.kitchen import Kitchen, set_logger, min_ttl
-from orders_simulation.kitchendata import load_orders, load_config, Order
-from orders_simulation.orderstate import OrderState
+from orders_simulation.kitchendata import load_orders, load_config, Order, OVERFLOW, WASTE
+from orders_simulation.orderstate import OrderState, ShelfHistory
 
 cur_dir = pathlib.Path(__file__).parent
 
 orders_path = cur_dir.joinpath("fixture", "orders.json")
 config_path = cur_dir.joinpath("fixture", "config.json")
 
-orders = load_orders(orders_path, errors_sink = sys.stderr)
-config = load_config(config_path, errors_sink = sys.stderr)
+orders = load_orders(orders_path, errors_sink=sys.stderr)
+config = load_config(config_path, errors_sink=sys.stderr)
 
 
 def test_input_delay():
     test_kitchen = Kitchen(orders, config)
     test_kitchen.config.intake_orders_per_sec = 5
 
-    assert test_kitchen.input_delay() == 0.2 # 1.0 / 5
+    assert test_kitchen.input_delay() == 0.2  # 1.0 / 5
+
 
 def test_min_ttl():
     arr = [(2, 0.1)]
-    assert min_ttl(arr) == 2
+    assert min_ttl(arr) == (2, 0.1)
 
     arr.append((3, -0.1))
-    assert min_ttl(arr) == 3
+    assert min_ttl(arr) == (3, -0.1)
+
 
 def test_accept_orders():
     """Testing two things: input rate(exec time) & total number of orders"""
 
     test_kitchen = Kitchen(orders, config)
-    test_kitchen.config.intake_orders_per_sec = 10
 
-    lock = Lock() # just in case when input rate is very high...    
+    lock = Lock()  # just in case when input rate is very high...
     called_count = 0
-    accuracy = 0.1
+    delay_total = 0.0
 
-    expected = test_kitchen.input_delay() * len(orders)
-    
     def mock_fulfill_order(order_num: int, order: Order):
         nonlocal called_count, lock
         with lock:
             called_count += 1
 
+    def mock_delay(d):
+        nonlocal delay_total
+        delay_total += d
+
     test_kitchen.fulfill_order = mock_fulfill_order
+    with patch("time.sleep", mock_delay):
+        test_kitchen.accept_orders()
 
-    start = time.time()
-    test_kitchen.accept_orders()
-    elapsed = time.time() - start
+        assert called_count == len(orders)
+        assert math.isclose(
+            delay_total, test_kitchen.input_delay() * len(orders))
 
-    assert called_count == len(orders)
-    assert abs(elapsed - expected) < accuracy
+
+def test_shelf_orders():
+    test_kitchen = Kitchen(orders, config)
+
+    order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    state25 = OrderState(order, history=[ShelfHistory(shelf="hot")])
+    test_kitchen.orders_state[25] = state25
+
+    order = Order(id="yyy", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    hist = [
+        ShelfHistory(shelf="hot", added_at=0, removed_at=1),
+        ShelfHistory(shelf=WASTE, added_at=1)
+    ]
+    state33 = OrderState(order, history=hist)
+    test_kitchen.orders_state[33] = state33
+
+    wasted = test_kitchen.shelf_orders(WASTE)
+    assert len(wasted) == 1
+    assert wasted[0] == (33, state33)
+
+    hot = test_kitchen.shelf_orders("hot")
+    assert len(hot) == 1
+    assert hot[0] == (25, state25)
+
+
+def test_active_orders():
+    test_kitchen = Kitchen(orders, config)
+
+    order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    state25 = OrderState(order, history=[ShelfHistory(shelf="hot")])
+    test_kitchen.orders_state[25] = state25
+
+    # order 33 is technically not closed (removed_at==None for latest shelf)
+    order = Order(id="yyy", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    hist = [
+        ShelfHistory(shelf="hot", added_at=0, removed_at=1),
+        ShelfHistory(shelf=WASTE, added_at=1)
+    ]
+    state33 = OrderState(order, history=hist)
+    test_kitchen.orders_state[33] = state33
+
+    active = test_kitchen.active_orders()
+
+    assert len(active) == 2
+
+
+def test_remove_from_overflow_internal_error(caplog):
+    test_kitchen = Kitchen(orders, config)
+
+    # state is empty by default, including overflow shelf
+    test_kitchen.remove_from_overflow()
+
+    assert "INTERNAL ERROR" in caplog.records[0].message
+
+
+def test_remove_from_overflow_ok():
+    test_kitchen = Kitchen(orders, config)
+
+    order = Order(id="xxx", name="taco", temp="hot",
+                  shelfLife=1, decayRate=0.5)
+    state25 = OrderState(order, history=[ShelfHistory(shelf=OVERFLOW)])
+    test_kitchen.orders_state[25] = state25
+
+    order = Order(id="yyy", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    state33 = OrderState(order, history=[ShelfHistory(shelf=OVERFLOW)])
+    test_kitchen.orders_state[33] = state33
+
+    assert len(test_kitchen.shelf_orders(OVERFLOW)) == 2
+
+    test_kitchen.shelves[OVERFLOW] = 2
+    test_kitchen.config.capacity[OVERFLOW] = 2
+
+    #import pdb; pdb.set_trace()
+
+    test_kitchen.remove_from_overflow()
+    assert test_kitchen.shelves[OVERFLOW] == 1
+    # it supposed to remove order with lowest TTL - with greater decay rate
+    assert test_kitchen.orders_state[33].history[-1].shelf == WASTE
+    # previous state is closed
+    assert test_kitchen.orders_state[33].history[-2].removed_at != None
 
 
 def test_make_room():
     test_kitchen = Kitchen(orders, config)
 
-    assert test_kitchen.shelves["hot"] == 0 # before
+    assert test_kitchen.shelves["hot"] == 0  # before
     assert test_kitchen.make_room("hot") == "hot"
-    assert test_kitchen.shelves["hot"] == 1 # after
+    assert test_kitchen.shelves["hot"] == 1  # after
 
     # simulate overflow of "hot" shelf
     test_kitchen.shelves["hot"] = test_kitchen.config.capacity["hot"]
 
-    assert test_kitchen.shelves["overflow"] == 0 # before
-    assert test_kitchen.make_room("hot") == "overflow"
-    assert test_kitchen.shelves["overflow"] == 1 # after
+    assert test_kitchen.shelves[OVERFLOW] == 0  # before
+    assert test_kitchen.make_room("hot") == OVERFLOW
+    assert test_kitchen.shelves[OVERFLOW] == 1  # after
 
-    # simulate overflow of "overflow" shelf
-    test_kitchen.shelves["overflow"] = test_kitchen.config.capacity["overflow"]
+    # simulate overflow of OVERFLOW shelf
+    test_kitchen.shelves[OVERFLOW] = test_kitchen.config.capacity[OVERFLOW]
 
-    # overflow shelf supposed to have at least one order (it should be full in fact)
-    order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
-    test_kitchen.orders_state[30] = OrderState(order, time.time(), shelf="overflow")
+    test_kitchen.remove_from_overflow = Mock()
+    new_shelf = test_kitchen.make_room("hot")
 
-    assert test_kitchen.orders_state[30].wasted == False # before make_room
-    assert test_kitchen.make_room("hot") == "overflow"
-    assert test_kitchen.orders_state[30].wasted == True # after make_room
+    assert new_shelf == OVERFLOW
+    test_kitchen.remove_from_overflow.assert_called_once()
+    assert test_kitchen.shelves[OVERFLOW] == 1 + \
+        test_kitchen.config.capacity[OVERFLOW]
 
 
 def test_fulfill_order():
@@ -100,44 +184,43 @@ def test_fulfill_order():
     assert test_kitchen.dispatch_queue.empty()
     assert test_kitchen.orders_state == {}
 
-    order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
-    test_kitchen.fulfill_order(25, order)
+    order25 = Order(id="xxx", name="taco", temp="hot",
+                    shelfLife=1, decayRate=1)
+
+    test_kitchen.make_room = Mock(return_value="FOO")
+    test_kitchen.fulfill_order(25, order25)
 
     # not empty
     assert not test_kitchen.dispatch_queue.empty()
     assert 25 in test_kitchen.orders_state
-    assert isinstance(test_kitchen.orders_state[25], OrderState)
+    assert test_kitchen.orders_state[25].order == order25
+    assert test_kitchen.orders_state[25].history[0].shelf == "FOO"
 
 
 def test_dispatch_order_ok():
-    """Test the delay was in given range & state was removed (order picked up)"""
-    
+    """Test the delay was in given range & state updated (order picked up)"""
+
     test_kitchen = Kitchen(orders, config)
+    delay = None
 
-    test_kitchen.config.pickup_min_sec = 0.2
-    test_kitchen.config.pickup_max_sec = 0.4
+    def capture_delay(d):
+        nonlocal delay
+        delay = d
 
-    accuracy = 0.1
-
-    # empty before
-    assert test_kitchen.orders_state == {}
-    assert test_kitchen.stats_waste == []
-
+    # manually add a test order
     order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
-    state = OrderState(order, order_recieved=time.time(), wasted=False)
+    state = OrderState(order, history=[ShelfHistory(shelf="hot")])
     test_kitchen.orders_state[25] = state
+    test_kitchen.shelves["hot"] = 1
 
-    start = time.time()
-    test_kitchen.dispatch_order(25)
-    elapsed = time.time() - start
+    with patch("time.sleep", capture_delay):
+        test_kitchen.dispatch_order(25)
+        assert delay <= test_kitchen.config.pickup_max_sec
+        assert delay >= test_kitchen.config.pickup_min_sec
 
-    # empty after
-    assert test_kitchen.orders_state == {}
-    assert test_kitchen.stats_waste == []
-
-    # delay within given range
-    assert elapsed < test_kitchen.config.pickup_max_sec + accuracy
-    assert elapsed > test_kitchen.config.pickup_min_sec - accuracy
+        assert test_kitchen.orders_state[25].history[-1].added_at != None
+        assert test_kitchen.orders_state[25].history[-1].removed_at != None
+        assert test_kitchen.shelves["hot"] == 0  # descreased
 
 
 def test_dispatch_order_wasted():
@@ -145,30 +228,20 @@ def test_dispatch_order_wasted():
 
     test_kitchen = Kitchen(orders, config)
 
-    test_kitchen.config.pickup_min_sec = 0.01
-    test_kitchen.config.pickup_max_sec = 0.02
-
-    # empty before
-    assert test_kitchen.orders_state == {}
-    assert test_kitchen.stats_waste == []
-
-    now = time.time()
-    state = OrderState(object, order_recieved=now, wasted=True)
+    # manually add a wasted test order
+    order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    hist = [
+        ShelfHistory(shelf="hot", added_at=0, removed_at=1),
+        ShelfHistory(shelf=WASTE, added_at=1)
+    ]
+    state = OrderState(order, history=hist)
     test_kitchen.orders_state[33] = state
 
-    test_kitchen.dispatch_order(33)
+    with patch("time.sleep", Mock()):
+        test_kitchen.dispatch_order(33)
 
-    # after: orders are empty, but stats_waste is not
-    assert test_kitchen.orders_state == {}
-    assert len(test_kitchen.stats_waste) == 1
-
-    # Checking that actual data stored in stats_waste
-    assert test_kitchen.stats_waste[0].order_num == 33
-    assert test_kitchen.stats_waste[0].order_state == state
-
-    # execution speed as expected (courier dispatched -> delay -> courier arrived)
-    arrived_at = test_kitchen.stats_waste[0].courier_arrived_at
-    assert abs(arrived_at - now) < 2 * test_kitchen.config.pickup_max_sec
+        assert test_kitchen.orders_state[33].history[-1].added_at != None
+        assert test_kitchen.orders_state[33].history[-1].removed_at != None
 
 
 def test_run():
@@ -178,4 +251,4 @@ def test_run():
     test_kitchen.run()
 
     assert len(orders) > 0
-    assert len(test_kitchen.orders_state) == 0
+    assert len(test_kitchen.orders_state) == len(orders)
