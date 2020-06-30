@@ -9,6 +9,7 @@ from .kitchendata import Order
 @dataclass
 class ShelfHistory:
     shelf: str
+    reason: str
     added_at: float = time.time()
     removed_at: float = None
 

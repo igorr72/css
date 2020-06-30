@@ -5,7 +5,7 @@ import math
 
 from unittest.mock import Mock, patch
 
-from orders_simulation.kitchendata import Order
+from orders_simulation.kitchendata import Order, OVERFLOW
 from orders_simulation.orderstate import OrderState, ShelfHistory
 
 cur_dir = pathlib.Path(__file__).parent
@@ -15,8 +15,10 @@ def test_decay_modifiers():
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=3, decayRate=5.0)
     hist = [
-        ShelfHistory(shelf="hot"),     # do not care about age
-        ShelfHistory(shelf="overflow")  # do not care about age
+        # do not care about age
+        ShelfHistory(shelf="hot", reason="new_order"),
+        # do not care about age
+        ShelfHistory(shelf=OVERFLOW, reason="overflow_full")
     ]
     state = OrderState(order, history=hist)
 
@@ -27,8 +29,10 @@ def test_decay_rates():
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=3, decayRate=0.5)
     hist = [
-        ShelfHistory(shelf="hot"),     # do not care about age
-        ShelfHistory(shelf="overflow")  # do not care about age
+        # do not care about age
+        ShelfHistory(shelf="hot", reason="new_order"),
+        # do not care about age
+        ShelfHistory(shelf="overflow", reason="overflow_full")
     ]
     state = OrderState(order, history=hist)
 
@@ -39,8 +43,10 @@ def test_ages_fixed():
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=3, decayRate=0.5)
     hist = [
-        ShelfHistory(shelf="hot", added_at=1.1, removed_at=3.1),     # age: 2
-        ShelfHistory(shelf="overflow", added_at=3.1, removed_at=4.1)  # age: 1
+        ShelfHistory(shelf="hot", added_at=1.1, removed_at=3.1,
+                     reason="new_order"),     # age: 2
+        ShelfHistory(shelf="overflow", added_at=3.1,
+                     removed_at=4.1, reason="overflow_full")  # age: 1
     ]
     state = OrderState(order, history=hist)
     ages = state.ages()
@@ -53,7 +59,8 @@ def test_ages_not_removed_yet():
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=3, decayRate=0.5)
     hist = [
-        ShelfHistory(shelf="hot", added_at=1.1, removed_at=None)
+        ShelfHistory(shelf="hot", added_at=1.1,
+                     removed_at=None, reason="new_order")
     ]
     state = OrderState(order, history=hist)
     with patch("time.time", Mock(return_value=2.1)):
@@ -65,8 +72,10 @@ def test_value():
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=3, decayRate=0.5)
     hist = [
-        ShelfHistory(shelf="hot", added_at=1.1, removed_at=3.1),     # age: 2
-        ShelfHistory(shelf="overflow", added_at=3.1, removed_at=4.1)  # age: 1
+        ShelfHistory(shelf="hot", added_at=1.1, removed_at=3.1,
+                     reason="new_order"),     # age: 2
+        ShelfHistory(shelf="overflow", added_at=3.1,
+                     removed_at=4.1, reason="overflow_full")  # age: 1
     ]
     state = OrderState(order, history=hist)
     # value = 1 - (2*0.5 + 1*1) / 3 => 1 - 2/3
@@ -77,9 +86,10 @@ def test_ttl():
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=3, decayRate=0.5)
     hist = [
-        ShelfHistory(shelf="hot", added_at=1.1, removed_at=4.1),      # age: 3
+        ShelfHistory(shelf="hot", added_at=1.1, removed_at=4.1,
+                     reason="new_order"),      # age: 3
         ShelfHistory(shelf="overflow", added_at=4.1,
-                     removed_at=None)  # ttl about 1.5
+                     removed_at=None, reason="overflow_full")  # ttl about 1.5
     ]
     state = OrderState(order, history=hist)
     # ttl = (shelfLife - sum(prior_decays)) / last_decay_rate
@@ -94,9 +104,10 @@ def test_pickup_ttl():
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=3, decayRate=0.5)
     hist = [
-        ShelfHistory(shelf="hot", added_at=1.1, removed_at=4.1),      # age: 3
+        ShelfHistory(shelf="hot", added_at=1.1, removed_at=4.1,
+                     reason="new_order"),      # age: 3
         ShelfHistory(shelf="overflow", added_at=4.1,
-                     removed_at=None)  # ttl about 1.5
+                     removed_at=None, reason="overflow_full")  # ttl about 1.5
     ]
     state = OrderState(order, history=hist)
     # ttl = (shelfLife - sum(prior_decays)) / last_decay_rate

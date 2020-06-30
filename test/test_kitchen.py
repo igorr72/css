@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from threading import Lock
 from collections import Counter
 
-from orders_simulation.kitchen import Kitchen, set_logger, min_ttl
+from orders_simulation.kitchen import Kitchen, set_logger, min_value
 from orders_simulation.kitchendata import load_orders, load_config, Order, OVERFLOW, WASTE
 from orders_simulation.orderstate import OrderState, ShelfHistory
 
@@ -29,12 +29,12 @@ def test_input_delay():
     assert test_kitchen.input_delay() == 0.2  # 1.0 / 5
 
 
-def test_min_ttl():
-    arr = [(2, 0.1)]
-    assert min_ttl(arr) == (2, 0.1)
+def test_min_value():
+    d = {2: 0.1}
+    assert min_value(d) == (2, 0.1)
 
-    arr.append((3, -0.1))
-    assert min_ttl(arr) == (3, -0.1)
+    d.update({3: -0.1})
+    assert min_value(d) == (3, -0.1)
 
 
 def test_accept_orders():
@@ -68,13 +68,15 @@ def test_shelf_orders():
     test_kitchen = Kitchen(orders, config)
 
     order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
-    state25 = OrderState(order, history=[ShelfHistory(shelf="hot")])
+    state25 = OrderState(
+        order, history=[ShelfHistory(shelf="hot", reason="new_order")])
     test_kitchen.orders_state[25] = state25
 
     order = Order(id="yyy", name="taco", temp="hot", shelfLife=1, decayRate=1)
     hist = [
-        ShelfHistory(shelf="hot", added_at=0, removed_at=1),
-        ShelfHistory(shelf=WASTE, added_at=1)
+        ShelfHistory(shelf="hot", added_at=0,
+                     removed_at=1, reason="new_order"),
+        ShelfHistory(shelf=WASTE, added_at=1, reason="overflow_full")
     ]
     state33 = OrderState(order, history=hist)
     test_kitchen.orders_state[33] = state33
@@ -92,14 +94,16 @@ def test_active_orders():
     test_kitchen = Kitchen(orders, config)
 
     order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
-    state25 = OrderState(order, history=[ShelfHistory(shelf="hot")])
+    state25 = OrderState(
+        order, history=[ShelfHistory(shelf="hot", reason="new_order")])
     test_kitchen.orders_state[25] = state25
 
     # order 33 is technically not closed (removed_at==None for latest shelf)
     order = Order(id="yyy", name="taco", temp="hot", shelfLife=1, decayRate=1)
     hist = [
-        ShelfHistory(shelf="hot", added_at=0, removed_at=1),
-        ShelfHistory(shelf=WASTE, added_at=1)
+        ShelfHistory(shelf="hot", added_at=0,
+                     removed_at=1, reason="new_order"),
+        ShelfHistory(shelf=WASTE, added_at=1, reason="overflow_full")
     ]
     state33 = OrderState(order, history=hist)
     test_kitchen.orders_state[33] = state33
@@ -109,25 +113,62 @@ def test_active_orders():
     assert len(active) == 2
 
 
-def test_remove_from_overflow_internal_error(caplog):
-    test_kitchen = Kitchen(orders, config)
-
-    # state is empty by default, including overflow shelf
-    test_kitchen.remove_from_overflow()
-
-    assert "INTERNAL ERROR" in caplog.records[0].message
-
-
-def test_remove_from_overflow_ok():
+def test_find_recoverable_orders():
     test_kitchen = Kitchen(orders, config)
 
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=1, decayRate=0.5)
-    state25 = OrderState(order, history=[ShelfHistory(shelf=OVERFLOW)])
+    state25 = OrderState(
+        order, history=[ShelfHistory(shelf=OVERFLOW, reason="new_order")])
+    test_kitchen.orders_state[25] = state25
+
+    order = Order(id="yyy", name="icecream",
+                  temp="cold", shelfLife=1, decayRate=1)
+    state33 = OrderState(
+        order, history=[ShelfHistory(shelf=OVERFLOW, reason="new_order")])
+    test_kitchen.orders_state[33] = state33
+
+    test_kitchen.shelves["hot"] = test_kitchen.config.capacity["hot"]
+    test_kitchen.shelves["cold"] = test_kitchen.config.capacity["cold"] - 1
+
+    #import pdb; pdb.set_trace()
+    d = test_kitchen.find_recoverable_orders([25, 33])
+    assert list(d.keys()) == [33]
+
+
+def test_recover_order():
+    test_kitchen = Kitchen(orders, config)
+
+    order = Order(id="yyy", name="icecream",
+                  temp="cold", shelfLife=1, decayRate=1)
+    state33 = OrderState(
+        order, history=[ShelfHistory(shelf=OVERFLOW, reason="new_order")])
+    test_kitchen.orders_state[33] = state33
+
+    test_kitchen.shelves["cold"] = test_kitchen.config.capacity["cold"] - 1
+
+    assert len(state33.history) == 1  # before
+
+    test_kitchen.recover_order(33)
+
+    assert len(state33.history) == 2  # after
+    # increased
+    assert test_kitchen.shelves["cold"] == test_kitchen.config.capacity["cold"]
+    assert state33.history[-1].added_at == state33.history[-2].removed_at
+
+
+def test_remove_from_overflow():
+    test_kitchen = Kitchen(orders, config)
+
+    order = Order(id="xxx", name="taco", temp="hot",
+                  shelfLife=1, decayRate=0.5)
+    state25 = OrderState(
+        order, history=[ShelfHistory(shelf=OVERFLOW, reason="new_order")])
     test_kitchen.orders_state[25] = state25
 
     order = Order(id="yyy", name="taco", temp="hot", shelfLife=1, decayRate=1)
-    state33 = OrderState(order, history=[ShelfHistory(shelf=OVERFLOW)])
+    state33 = OrderState(
+        order, history=[ShelfHistory(shelf=OVERFLOW, reason="new_order")])
     test_kitchen.orders_state[33] = state33
 
     assert len(test_kitchen.shelf_orders(OVERFLOW)) == 2
@@ -135,14 +176,28 @@ def test_remove_from_overflow_ok():
     test_kitchen.shelves[OVERFLOW] = 2
     test_kitchen.config.capacity[OVERFLOW] = 2
 
-    #import pdb; pdb.set_trace()
+    test_kitchen.remove_from_overflow({25: 1.0, 33: -1.0})
 
-    test_kitchen.remove_from_overflow()
-    assert test_kitchen.shelves[OVERFLOW] == 1
+    assert test_kitchen.shelves[OVERFLOW] == 2  # does not change
     # it supposed to remove order with lowest TTL - with greater decay rate
     assert test_kitchen.orders_state[33].history[-1].shelf == WASTE
     # previous state is closed
     assert test_kitchen.orders_state[33].history[-2].removed_at != None
+
+
+def test_make_room_raise():
+    test_kitchen = Kitchen(orders, config)
+
+    # simulate overflow of "hot" shelf
+    test_kitchen.shelves["hot"] = test_kitchen.config.capacity["hot"]
+
+    # simulate overflow of OVERFLOW shelf
+    test_kitchen.shelves[OVERFLOW] = test_kitchen.config.capacity[OVERFLOW]
+
+    # state is empty by default, including overflow shelf
+    with pytest.raises(RuntimeError) as e:
+        test_kitchen.make_room("hot")
+        assert "INTERNAL ERROR" in str(e.value)
 
 
 def test_make_room():
@@ -159,16 +214,36 @@ def test_make_room():
     assert test_kitchen.make_room("hot") == OVERFLOW
     assert test_kitchen.shelves[OVERFLOW] == 1  # after
 
-    # simulate overflow of OVERFLOW shelf
-    test_kitchen.shelves[OVERFLOW] = test_kitchen.config.capacity[OVERFLOW]
+    order = Order(id="yyy", name="ice", temp="cold", shelfLife=1, decayRate=1)
+    state33 = OrderState(
+        order, history=[ShelfHistory(shelf=OVERFLOW, reason="new_order")])
+    test_kitchen.orders_state[33] = state33
 
-    test_kitchen.remove_from_overflow = Mock()
+    # simulate overflow of OVERFLOW shelf
+    test_kitchen.shelves[OVERFLOW] = 1
+    test_kitchen.config.capacity[OVERFLOW] = 1
+
+    assert test_kitchen.shelves["cold"] == 0  # before
+
     new_shelf = test_kitchen.make_room("hot")
 
+    # by default recoverable order should be found
+    assert test_kitchen.shelves[OVERFLOW] == 1  # no changed
     assert new_shelf == OVERFLOW
-    test_kitchen.remove_from_overflow.assert_called_once()
-    assert test_kitchen.shelves[OVERFLOW] == 1 + \
-        test_kitchen.config.capacity[OVERFLOW]
+    assert test_kitchen.shelves["cold"] == 1  # was recovered
+    # recovered
+    assert test_kitchen.orders_state[33].history[-1].shelf == "cold"
+
+    order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
+    state25 = OrderState(
+        order, history=[ShelfHistory(shelf=OVERFLOW, reason="new_order")])
+    test_kitchen.orders_state[25] = state25
+
+    new_shelf = test_kitchen.make_room("hot")
+
+    assert test_kitchen.shelves[OVERFLOW] == 1  # no changed
+    assert new_shelf == OVERFLOW
+    assert test_kitchen.orders_state[25].history[-1].shelf == WASTE  # removed
 
 
 def test_fulfill_order():
@@ -209,7 +284,8 @@ def test_dispatch_order_ok():
 
     # manually add a test order
     order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
-    state = OrderState(order, history=[ShelfHistory(shelf="hot")])
+    state = OrderState(
+        order, history=[ShelfHistory(shelf="hot", reason="new_order")])
     test_kitchen.orders_state[25] = state
     test_kitchen.shelves["hot"] = 1
 
@@ -231,8 +307,9 @@ def test_dispatch_order_wasted():
     # manually add a wasted test order
     order = Order(id="xxx", name="taco", temp="hot", shelfLife=1, decayRate=1)
     hist = [
-        ShelfHistory(shelf="hot", added_at=0, removed_at=1),
-        ShelfHistory(shelf=WASTE, added_at=1)
+        ShelfHistory(shelf="hot", added_at=0,
+                     removed_at=1, reason="new_order"),
+        ShelfHistory(shelf=WASTE, added_at=1, reason="overflow_full")
     ]
     state = OrderState(order, history=hist)
     test_kitchen.orders_state[33] = state

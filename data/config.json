@@ -1,11 +1,11 @@
 {
   "capacity": {
-    "hot": 10,
-    "cold": 10,
-    "frozen": 10,
-    "overflow": 15
+    "hot": 5,
+    "cold": 5,
+    "frozen": 5,
+    "overflow": 5
   },
-  "intake_orders_per_sec": 2,
+  "intake_orders_per_sec": 4,
   "pickup_min_sec": 2,
   "pickup_max_sec": 6
 }

@@ -75,7 +75,7 @@ def load_orders(filename: str, errors_sink) -> Optional[List[Order]]:
             f"load_orders: Can't convert json data into {Order}: {e}", file=errors_sink)
         return None
 
-    return obj_list[:13]
+    return obj_list
 
 
 def load_config(filename: str, errors_sink) -> Optional[Config]:

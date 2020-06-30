@@ -9,6 +9,8 @@ from typing import List, Dict, Tuple
 from .kitchendata import Order, Config, shelf_types, WASTE, OVERFLOW
 from .orderstate import OrderState, ShelfHistory
 
+from sys import maxsize as MAXINT
+
 
 def set_logger(debug_level: int) -> None:
     """Configure logger for kitchen orders troubleshooting"""
@@ -26,17 +28,17 @@ def set_logger(debug_level: int) -> None:
     )
 
 
-def min_ttl(ttl_orders: List[Tuple[int, float]]) -> Tuple[int, float]:
-    """Finds and retunrs the order number with smallest TTL (time-to-live)"""
+def min_value(orders_with_metric: Dict[int, float]) -> Tuple[int, float]:
+    """Finds and returns the order number with smallest value"""
 
-    order_num, min_ttl = ttl_orders[0]
+    min_val = MAXINT
 
-    for num, ttl in ttl_orders:
-        if ttl < min_ttl:
-            min_ttl = ttl
+    for num, val in orders_with_metric.items():
+        if val < min_val:
+            min_val = val
             order_num = num
 
-    return order_num, min_ttl
+    return order_num, min_val
 
 
 class Kitchen:
@@ -96,28 +98,47 @@ class Kitchen:
             if state.history[-1].removed_at == None
         ]
 
-    def remove_from_overflow(self):
+    def find_recoverable_orders(self, order_nums: List[int]) -> Dict[int, float]:
+        """Check all non-OVERFLOW shelves to find ones that are not full"""
+
+        recoverable = {}
+
+        for order_num in order_nums:
+            shelf = self.orders_state[order_num].order.temp
+            if self.shelves[shelf] < self.config.capacity[shelf]:
+                utilization = 1.0 * \
+                    self.shelves[shelf]/self.config.capacity[shelf]
+                recoverable[order_num] = utilization
+
+        return recoverable
+
+    def recover_order(self, order_num: int):
+        """Recover given order from overflow shelf to its original shelf"""
+
+        state = self.orders_state[order_num]  # just a pointer to a data
+        shelf = state.order.temp
+
+        now = time.time()
+        state.history[-1].removed_at = now  # close current state (overflow)
+        hist = ShelfHistory(shelf=shelf, added_at=now, reason="recovery")
+
+        state.history.append(hist)
+        self.shelves[shelf] += 1  # added order to that shelf
+
+        self.logger.warning(
+            f"order {order_num} recovered from {OVERFLOW} back to {shelf}")
+
+    def remove_from_overflow(self, ttl_orders: Dict[int, float]):
         """Remove order with lowest pickup_ttl from overflow shelf"""
 
-        ttl_orders = [
-            (order_num, state.pickup_ttl(self.config.pickup_max_sec))
-            for order_num, state in self.shelf_orders(OVERFLOW)
-        ]
-
-        if len(ttl_orders) != self.config.capacity[OVERFLOW]:
-            self.logger.error(
-                f"INTERNAL ERROR: overflow shelf expected to be full ({self.config.capacity[OVERFLOW]}) but it was not: {len(ttl_orders)}")
-            return
-
-        order_num, ttl = min_ttl(ttl_orders)
+        order_num, ttl = min_value(ttl_orders)
 
         # throw away the order with smallest TTL
         now = time.time()
         self.orders_state[order_num].history[-1].removed_at = now
-        hist = ShelfHistory(shelf=WASTE, added_at=now)
+        hist = ShelfHistory(shelf=WASTE, added_at=now, reason="overflow_full")
 
         self.orders_state[order_num].history.append(hist)
-        self.shelves[OVERFLOW] -= 1  # removed one order
 
         self.logger.error(
             f"overflow shelf is full, moving previous order {order_num} to waste: pickup_ttl={ttl}")
@@ -138,8 +159,27 @@ class Kitchen:
             self.shelves[OVERFLOW] += 1
             return OVERFLOW
 
-        self.remove_from_overflow()
-        self.shelves[OVERFLOW] += 1  # new order added
+        ttl_orders = {
+            order_num: state.pickup_ttl(self.config.pickup_max_sec)
+            for order_num, state in self.shelf_orders(OVERFLOW)
+            if state.history[-1].removed_at == None  # active orders only
+        }
+
+        if len(ttl_orders) != self.config.capacity[OVERFLOW]:
+            self.logger.error(
+                f"INTERNAL ERROR: overflow shelf expected to be full ({self.config.capacity[OVERFLOW]}) but it was not: {len(ttl_orders)}")
+            raise RuntimeError("INTERNAL ERROR")
+
+        recoverable = self.find_recoverable_orders(ttl_orders.keys())
+        if recoverable:
+            self.logger.debug(f"found recoverable orders: {recoverable}")
+            # will recover order with smallest shelf utilization (i.e. more free space)
+            order_num, _ = min_value(recoverable)
+            self.recover_order(order_num)
+        else:
+            self.logger.debug(
+                f"throw-away candidates from overflow shelf: {ttl_orders}")
+            self.remove_from_overflow(ttl_orders)
 
         return OVERFLOW
 
@@ -155,7 +195,7 @@ class Kitchen:
 
         with self.lock:
             shelf = self.make_room(order.temp)
-            hist = ShelfHistory(shelf=shelf)
+            hist = ShelfHistory(shelf=shelf, reason="new_order")
             self.logger.info(f"put new order {order_num} onto shelf {shelf}")
             self.orders_state[order_num] = OrderState(
                 order=order, history=[hist])
