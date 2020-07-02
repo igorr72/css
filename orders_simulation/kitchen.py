@@ -10,6 +10,7 @@ from .kitchendata import Order, Config, shelf_types, WASTE, OVERFLOW
 from .orderstate import OrderState, ShelfHistory
 
 from sys import maxsize as MAXINT
+from collections import Counter
 
 
 def set_logger(debug_level: int) -> None:
@@ -29,7 +30,7 @@ def set_logger(debug_level: int) -> None:
 
 
 def min_value(orders_with_metric: Dict[int, float]) -> Tuple[int, float]:
-    """Finds and returns the order number with smallest value"""
+    """Finds and returns the order number with smallest value associated with it"""
 
     min_val = MAXINT
 
@@ -58,14 +59,23 @@ class Kitchen:
         # Keep individual states for each order
         self.orders_state: Dict[int, OrderState] = {}
 
-        # Counters for each shelf
-        self.shelves: Dict[str, int] = {
-            shelf: 0 for shelf in shelf_types + [OVERFLOW]}
-
     def input_delay(self) -> float:
         """Calculates a delay for a single order"""
 
         return 1.0 / self.config.intake_orders_per_sec
+
+    def cleanup(self) -> None:
+        """Throw away orders with value <= 0"""
+
+        for order_num, state in self.active_orders():
+            val = state.value()
+
+            if val <= 0:
+                state.move(state=ShelfHistory(shelf=WASTE), value=val)
+
+                self.logger.error(
+                    f"order {order_num} became unhealthy, value: {val}")
+                self.logger.debug(f"order {order_num} details: {state}")
 
     def accept_orders(self) -> None:
         """Simulating real-world input queue"""
@@ -89,8 +99,8 @@ class Kitchen:
             if state.history[-1].shelf == shelf
         ]
 
-    def active_orders(self):
-        """Generate a list of active orders"""
+    def unfinished_orders(self):
+        """Generate a list of active orders for any shelf"""
 
         return [
             (order_num, state)
@@ -98,127 +108,144 @@ class Kitchen:
             if state.history[-1].removed_at == None
         ]
 
-    def find_recoverable_orders(self, order_nums: List[int]) -> Dict[int, float]:
+    def active_orders(self):
+        """Generate a list of active orders except WASTE"""
+
+        return [
+            (order_num, state)
+            for order_num, state in self.unfinished_orders()
+            if state.history[-1].shelf != WASTE
+        ]
+
+    def shelves_count(self) -> Counter:
+        """Get a snapshot of all orders and return a count for orders on each shelf"""
+
+        # only active orders for normal shelfs
+        shelves_names = [
+            state.history[-1].shelf
+            for _, state in self.active_orders()
+        ]
+
+        # all orders (historical) for the [virtual] WASTE shelf
+        waste_names = [WASTE for _ in self.shelf_orders(WASTE)]
+
+        return Counter(shelves_names + waste_names)
+
+    def find_recoverable_orders(self, count: Counter, order_nums: List[int]) -> Dict[int, float]:
         """Check all non-OVERFLOW shelves to find ones that are not full"""
 
         recoverable = {}
 
         for order_num in order_nums:
             shelf = self.orders_state[order_num].order.temp
-            if self.shelves[shelf] < self.config.capacity[shelf]:
-                utilization = 1.0 * \
-                    self.shelves[shelf]/self.config.capacity[shelf]
+            if count[shelf] < self.config.capacity[shelf]:
+                utilization = count[shelf] / self.config.capacity[shelf]
                 recoverable[order_num] = utilization
 
         return recoverable
 
-    def recover_order(self, order_num: int):
-        """Recover given order from overflow shelf to its original shelf"""
-
-        state = self.orders_state[order_num]  # just a pointer to a data
-        shelf = state.order.temp
-
-        now = time.time()
-        state.history[-1].removed_at = now  # close current state (overflow)
-        hist = ShelfHistory(shelf=shelf, added_at=now, reason="recovery")
-
-        state.history.append(hist)
-        self.shelves[shelf] += 1  # added order to that shelf
-
-        self.logger.warning(
-            f"order {order_num} recovered from {OVERFLOW} back to {shelf}")
-
-    def remove_from_overflow(self, ttl_orders: Dict[int, float]):
-        """Remove order with lowest pickup_ttl from overflow shelf"""
-
-        order_num, ttl = min_value(ttl_orders)
-
-        # throw away the order with smallest TTL
-        now = time.time()
-        self.orders_state[order_num].history[-1].removed_at = now
-        hist = ShelfHistory(shelf=WASTE, added_at=now, reason="overflow_full")
-
-        self.orders_state[order_num].history.append(hist)
-
-        self.logger.error(
-            f"overflow shelf is full, moving previous order {order_num} to waste: pickup_ttl={ttl}")
-
-    def make_room(self, desired_shelf: str) -> str:
+    def make_room(self, count: Counter, desired_shelf: str) -> str:
         """Returns a shelf name where to put a new order. This function might modify
         the other orders states to make room if all shelfs are full"""
 
-        if self.shelves[desired_shelf] < self.config.capacity[desired_shelf]:
-            self.logger.info(
-                f"requested shelf {desired_shelf} has enough room: OK")
-            self.shelves[desired_shelf] += 1
+        if count[desired_shelf] < self.config.capacity[desired_shelf]:
             return desired_shelf
 
-        if self.shelves[OVERFLOW] < self.config.capacity[OVERFLOW]:
+        if count[OVERFLOW] < self.config.capacity[OVERFLOW]:
             self.logger.warning(
-                f"requested shelf {desired_shelf} is full: use overflow")
-            self.shelves[OVERFLOW] += 1
+                f"shelf {desired_shelf} is full ({count[desired_shelf]}/{self.config.capacity[desired_shelf]})" +
+                f"; will use {OVERFLOW} ({count[OVERFLOW]}/{self.config.capacity[OVERFLOW]})")
             return OVERFLOW
 
-        ttl_orders = {
-            order_num: state.pickup_ttl(self.config.pickup_max_sec)
+        self.logger.warning(
+            f"{OVERFLOW} shelf is FULL ({count[OVERFLOW]}/{self.config.capacity[OVERFLOW]})")
+
+        orders_ttl = {
+            order_num: state.pickup_ttl()
             for order_num, state in self.shelf_orders(OVERFLOW)
             if state.history[-1].removed_at == None  # active orders only
         }
 
-        if len(ttl_orders) != self.config.capacity[OVERFLOW]:
-            self.logger.error(
-                f"INTERNAL ERROR: overflow shelf expected to be full ({self.config.capacity[OVERFLOW]}) but it was not: {len(ttl_orders)}")
-            raise RuntimeError("INTERNAL ERROR")
+        recoverable = self.find_recoverable_orders(count, orders_ttl.keys())
 
-        recoverable = self.find_recoverable_orders(ttl_orders.keys())
         if recoverable:
-            self.logger.debug(f"found recoverable orders: {recoverable}")
             # will recover order with smallest shelf utilization (i.e. more free space)
             order_num, _ = min_value(recoverable)
-            self.recover_order(order_num)
+
+            state = self.orders_state[order_num]
+            state.move(ShelfHistory(shelf=state.order.temp))
+
+            self.logger.warning(
+                f"order {order_num} recovered from {OVERFLOW} back to desired shelf")
         else:
-            self.logger.debug(
-                f"throw-away candidates from overflow shelf: {ttl_orders}")
-            self.remove_from_overflow(ttl_orders)
+            # throw away the order with smallest TTL
+            order_num, pickup_ttl = min_value(orders_ttl)
+
+            state = self.orders_state[order_num]
+            state.move(ShelfHistory(shelf=WASTE))
+
+            self.logger.error(
+                f"order {order_num} with lowest pickup_ttl={pickup_ttl} goes to {WASTE}")
+
+        self.logger.debug(
+            f"order {order_num} details: {self.orders_state[order_num]}")
 
         return OVERFLOW
 
-    def log_snapshot_all(self):
+    def snapshot(self):
         """Dumps the current state of all shelves to logger"""
 
-        for shelf, count in self.shelves.items():
+        for shelf, count in self.shelves_count().items():
+            capacity = self.config.capacity[shelf] if shelf in self.config.capacity else "UNLIMITED"
             self.logger.debug(
-                f"SNAPSHOT: shelf={shelf}, count={count}, capacity={self.config.capacity[shelf]}")
+                f"SNAPSHOT: shelf: {shelf}, count: {count}/{capacity}")
 
     def fulfill_order(self, order_num: int, order: Order) -> None:
         """Main logic: create new state for the order; dispatch courier"""
 
         with self.lock:
-            shelf = self.make_room(order.temp)
-            hist = ShelfHistory(shelf=shelf, reason="new_order")
-            self.logger.info(f"put new order {order_num} onto shelf {shelf}")
+            # remove stale orders and get fresh count afterwards
+            self.cleanup()
+            count = self.shelves_count()
+
+            # find a proper shelf for new order
+            shelf = self.make_room(count, order.temp)
+
+            # simulate pickup delay
+            delay = int(random.uniform(
+                self.config.pickup_min_sec, self.config.pickup_max_sec))
+
+            # add new order into our main data structure
             self.orders_state[order_num] = OrderState(
-                order=order, history=[hist])
-            self.log_snapshot_all()
+                order=order, init_state=ShelfHistory(shelf), pickup_sec=delay)
+
+            self.logger.info(
+                f"put new order {order_num} onto shelf {shelf}; pickup in {delay} sec")
+
+            # dumps fresh counters after new order was added
+            self.snapshot()
 
         courier = Thread(target=self.dispatch_order, args=(
-            order_num,), name=f"dispatch_order_{order_num}", daemon=True)
+            order_num, delay,), name=f"dispatch_order_{order_num}", daemon=True)
         courier.start()
-        self.dispatch_queue.put(courier)  # will wait for that thread to finish
 
-    def dispatch_order(self, order_num: int) -> None:
+        # will wait for that thread to finish in main thread
+        self.dispatch_queue.put(courier)
+
+    def dispatch_order(self, order_num: int, delay: int) -> None:
         """Dispatch courier as soon as order is received"""
 
-        delay = random.uniform(self.config.pickup_min_sec,
-                               self.config.pickup_max_sec)
-        self.logger.info(
-            f"dispatching courier for order_num {order_num} with delay {delay}")
         time.sleep(delay)
 
         with self.lock:
+            # remove all stale orders before attempting to pickup specific order
+            self.cleanup()
+
+            # close current order whether it was just moved to waste by cleanup or not
             state = self.orders_state[order_num]
+            state.close()
+
             last_shelf = state.history[-1]
-            last_shelf.removed_at = time.time()  # pick-up time stamp
 
             if last_shelf.shelf == WASTE:
                 when = last_shelf.removed_at - last_shelf.added_at
@@ -226,10 +253,9 @@ class Kitchen:
                     f"delivery failed as order {order_num} wasted {when} sec ago")
             else:
                 self.logger.info(
-                    f"order {order_num} delivered successfully from shelf {last_shelf.shelf}; value: {state.value()}")
-                self.logger.debug(
-                    f"order {order_num} full state with history: {state}")
-                self.shelves[last_shelf.shelf] -= 1
+                    f"order {order_num} delivered successfully from shelf {last_shelf.shelf}; value: {state.last_value}")
+
+            self.logger.debug(f"order {order_num} details: {state}")
 
     def run(self, debug_level: int = 0) -> None:
         """Main function (main thread) to iterate over all orders"""
@@ -238,7 +264,7 @@ class Kitchen:
 
         self.logger.info(f"Config: {self.config}")
         self.logger.warning(
-            f"Start processing: order count={len(self.orders)}")
+            f"Start kitchen: order count={len(self.orders)}")
 
         # consume from order queue at given rate
         self.accept_orders()
@@ -246,12 +272,11 @@ class Kitchen:
         # waiting for all dispatched couriers to finish
         while not self.dispatch_queue.empty():
             t = self.dispatch_queue.get()
-            self.logger.debug(f"waiting for {t} to finish")
             t.join()
 
         self.logger.warning(
-            f"Finish processing: active orders={len(self.active_orders())}")
+            f"Stop kitchen: unfinished orders={len(self.unfinished_orders())}")
 
         wasted = self.shelf_orders(WASTE)
         self.logger.warning(f"Wasted orders count={len(wasted)}")
-        self.logger.debug(f"Wasted orders={wasted}")
+        self.logger.debug(f"Wasted orders details: {wasted}")
