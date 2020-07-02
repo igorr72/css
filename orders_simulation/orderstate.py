@@ -3,7 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import List
 
-from .kitchendata import Order
+from .kitchendata import Order, WASTE
 
 
 @dataclass
@@ -30,6 +30,17 @@ class OrderState:
         self.history = [init_state]
         self.pickup_sec = pickup_sec
 
+    def current_shelf(self):
+        return self.history[-1].shelf
+
+    def current_age(self):
+        if self.history[-1].removed_at:
+            removed_at = self.history[-1].removed_at
+        else:
+            removed_at = time.time()
+
+        return removed_at - self.history[-1].added_at
+
     def close(self, value: float = None, removed_at: float = None):
         """Close last entry in history list with timestamp and value.
         It can be called directly, but mostly from append_state() method"""
@@ -43,7 +54,7 @@ class OrderState:
         # store final order value in closed last_stage
         self.last_value = last_stage.current_value
 
-    def move(self, state: ShelfHistory, value: float = None):
+    def move(self, state: ShelfHistory, value: float = None) -> float:
         """Close last entry in history and immediately add a new state"""
 
         now = time.time()
@@ -52,6 +63,14 @@ class OrderState:
         # removing discrepancy between two consequtive calls of time.time()
         state.added_at = now
         self.history.append(state)
+
+        return now
+
+    def move_to_waste(self, value: float = None) -> None:
+        """Close current state and immediately move to waste"""
+
+        now = self.move(ShelfHistory(WASTE), value=value)
+        self.close(removed_at=now)
 
     def decay_modifiers(self) -> List[int]:
         return [
@@ -67,13 +86,17 @@ class OrderState:
     def ages(self) -> float:
         """Sub-expression in calculating the age of the shelved order"""
 
-        res = []
+        all_ages = [
+            hist.removed_at - hist.added_at
+            for hist in self.history[:-1]
+        ]
 
-        for hist in self.history:
-            removed_at = hist.removed_at if hist.removed_at else time.time()
-            res.append(removed_at - hist.added_at)
+        all_ages.append(self.current_age())
 
-        return res
+        return all_ages
+
+    def total_age(self):
+        return sum(self.ages())
 
     def value(self) -> float:
         """Calculate the value for the order for entire shelf history"""

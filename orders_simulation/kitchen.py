@@ -3,7 +3,7 @@ import random
 import logging
 
 from queue import Queue
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 from typing import List, Dict, Tuple
 
 from .kitchendata import Order, Config, shelf_types, WASTE, OVERFLOW
@@ -53,24 +53,38 @@ class Kitchen:
         # Collecting all dispatch threads to wait for them before closing main thread
         self.dispatch_queue = Queue()
 
+        # Keep an Event for each dispatch thread to be able to terminate
+        # the delivery in case the order expires pior actual pickup
+        self.dispatch_events = {}
+
+        # one event to manage cleanup thread
+        self.cleanup_event = Event()
+
         # lock will protect modification of a global data structure orders_state
         self.lock = Lock()
 
         # Keep individual states for each order
         self.orders_state: Dict[int, OrderState] = {}
 
-        # the flag to stop running cleanup thread when needed
-        self.cleanup_run_flag: bool = True
-
     def input_delay(self) -> float:
         """Calculates a delay for a single order"""
 
         return 1.0 / self.config.intake_orders_per_sec
 
+    def terminate_delivery(self, order_num) -> None:
+        """Terminate delivery because order moved to waste"""
+
+        self.dispatch_events[order_num].set()  # terminate delivery
+
+        self.logger.debug(
+            f"order {order_num} sending Event signal to terminate delivery")
+
     def cleanup(self) -> None:
         """Throw away orders with value <= 0"""
 
-        while self.cleanup_run_flag:
+        while True:
+            self.cleanup_event.wait(self.config.cleanup_delay)
+
             with self.lock:
                 count = 0
                 expired = 0
@@ -79,13 +93,13 @@ class Kitchen:
                     val = state.value()
 
                     if val <= 0:
-                        expired += 1
-                        state.move(state=ShelfHistory(shelf=WASTE), value=val)
-
-                        age = time.time() - state.history[0].added_at
-
                         self.logger.error(
-                            f"order {order_num} became unhealthy after {age} sec, value: {val}")
+                            f"order {order_num} became UNHEALTHY after {state.total_age()} sec, value: {val}")
+
+                        expired += 1
+                        state.move_to_waste(value=val)
+                        self.terminate_delivery(order_num)
+
                         self.logger.debug(
                             f"order {order_num} details: {state}")
 
@@ -93,7 +107,8 @@ class Kitchen:
                     self.logger.debug(
                         f"cleanup summary: checked {count} orders, expired {expired}")
 
-            time.sleep(self.config.cleanup_delay)
+            if self.cleanup_event.is_set():
+                break
 
     def accept_orders(self) -> None:
         """Simulating real-world input queue"""
@@ -199,11 +214,11 @@ class Kitchen:
             # throw away the order with smallest TTL
             order_num, pickup_ttl = min_value(orders_ttl)
 
-            state = self.orders_state[order_num]
-            state.move(ShelfHistory(shelf=WASTE))
-
             self.logger.error(
                 f"order {order_num} with lowest pickup_ttl={pickup_ttl} goes to {WASTE}")
+
+            self.orders_state[order_num].move_to_waste()
+            self.terminate_delivery(order_num)
 
         self.logger.debug(
             f"order {order_num} details: {self.orders_state[order_num]}")
@@ -251,35 +266,34 @@ class Kitchen:
             # dumps fresh counters after new order was added
             self.snapshot()
 
+            # add new Event in case we need to terminate pickup prematurely
+            self.dispatch_events[order_num] = Event()
+
         courier = Thread(target=self.dispatch_order, args=(
             order_num, delay,), name=f"dispatch_order_{order_num}", daemon=True)
-        courier.start()
 
-        # will wait for that thread to finish in main thread
         self.dispatch_queue.put(courier)
+        courier.start()
 
     def dispatch_order(self, order_num: int, delay: int) -> None:
         """Dispatch courier as soon as order is received"""
 
         self.logger.debug(f"order {order_num} pickup delay {delay}")
-        time.sleep(delay)
+
+        self.dispatch_events[order_num].wait(delay)
 
         with self.lock:
             # close current order whether it was just moved to waste by cleanup or not
             state = self.orders_state[order_num]
-            state.close()
 
-            last_shelf = state.history[-1]
-
-            order_life = last_shelf.removed_at - state.history[0].added_at
-
-            if last_shelf.shelf == WASTE:
-                when = last_shelf.removed_at - last_shelf.added_at
+            if state.current_shelf() == WASTE:
                 self.logger.error(
-                    f"order {order_num} took {order_life} sec, FAILED, expired {when} sec ago")
+                    f"order {order_num} took {state.total_age()} sec, PICKUP CANCELLED, expired {state.current_age()} sec ago")
             else:
+                state.close()
+
                 self.logger.info(
-                    f"order {order_num} took {order_life} sec, DELIVERED from shelf {last_shelf.shelf}, value: {state.last_value}")
+                    f"order {order_num} took {state.total_age()} sec, DELIVERED from shelf {state.current_shelf()}, value: {state.last_value}")
 
             self.logger.debug(f"order {order_num} details: {state}")
 
@@ -293,8 +307,7 @@ class Kitchen:
             f"Start kitchen: order count={len(self.orders)}")
 
         # start cleanup process in background
-        cleanup = Thread(target=self.cleanup, name=f"cleanup", daemon=True)
-        cleanup.start()
+        Thread(target=self.cleanup, name=f"cleanup", daemon=True).start()
 
         # consume from order queue at given rate in main thread
         self.accept_orders()
@@ -305,7 +318,7 @@ class Kitchen:
             t.join()
 
         # stop cleanup thread
-        self.cleanup_run_flag = False
+        self.cleanup_event.set()
 
         self.logger.warning(
             f"Stop kitchen: unfinished orders={len(self.unfinished_orders())}")

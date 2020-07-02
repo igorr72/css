@@ -73,18 +73,17 @@ def test_cleanup():
     state_hot = _order_hot(test_kitchen)
     _order_cold(test_kitchen)
 
-    count_before = test_kitchen.shelves_count()
-    assert dict(count_before) == {"hot": 1, "cold": 1}
+    assert test_kitchen.shelves_count() == {"hot": 1, "cold": 1}
 
     # mock one order to return zero value
-    state_hot.value = Mock(return_value=0.0)
+    state_hot.value = Mock(return_value=-1.0)
+    test_kitchen.terminate_delivery = Mock()
 
-    with patch("time.sleep", Mock()):
-        Thread(target=test_kitchen.cleanup, daemon=True).start()
-        test_kitchen.cleanup_run_flag = False
+    test_kitchen.cleanup_event.set()
+    test_kitchen.cleanup()
 
-        count_after = test_kitchen.shelves_count()
-        assert dict(count_after) == {WASTE: 1, "cold": 1}
+    test_kitchen.terminate_delivery.assert_called_with(25)
+    assert test_kitchen.shelves_count() == {WASTE: 1, "cold": 1}
 
 
 def test_accept_orders():
@@ -319,8 +318,12 @@ def test_make_room_removal():
     # making sure there is nothing to recover...
     assert test_kitchen.find_recoverable_orders(counter, [25, 33]) == {}
 
+    # disable terminate_delivery method
+    test_kitchen.terminate_delivery = Mock()
+
     avail_shelf = test_kitchen.make_room(counter, "cold")
 
+    test_kitchen.terminate_delivery.assert_called_with(25)
     assert avail_shelf == OVERFLOW
 
     # make_room_ supposed to remove order with lowest pickup_ttl which
@@ -375,14 +378,19 @@ def test_dispatch_order_ok():
 
     assert test_kitchen.shelves_count()["hot"] == 1  # before
 
-    with patch("time.sleep", Mock()):
-        test_kitchen.dispatch_order(25, 999)  # delay does not matter
+    # Making a fake Event
+    test_kitchen.dispatch_events[25] = Mock()
+    test_kitchen.dispatch_events[25].wait = Mock()
 
-        assert state_hot.history[-1].added_at != None
-        assert state_hot.history[-1].removed_at != None
-        assert state_hot.history[-1].shelf == "hot"
+    test_kitchen.dispatch_order(25, 999)
 
-        assert test_kitchen.shelves_count()["hot"] == 0  # after
+    test_kitchen.dispatch_events[25].wait.assert_called_with(999)
+
+    assert state_hot.history[-1].added_at != None
+    assert state_hot.history[-1].removed_at != None
+    assert state_hot.history[-1].shelf == "hot"
+
+    assert test_kitchen.shelves_count()["hot"] == 0  # after
 
 
 def test_dispatch_order_wasted():
@@ -391,11 +399,16 @@ def test_dispatch_order_wasted():
     test_kitchen = Kitchen(orders, config)
 
     state_hot = _order_hot(test_kitchen)
-    state_hot.move(ShelfHistory(WASTE))
+    state_hot.move_to_waste()
 
-    with patch("time.sleep", Mock()):
-        test_kitchen.dispatch_order(25, 999)  # delay does not matter
+    # Making a fake Event
+    test_kitchen.dispatch_events[25] = Mock()
+    test_kitchen.dispatch_events[25].wait = Mock()
 
-        assert state_hot.history[-1].added_at != None
-        assert state_hot.history[-1].removed_at != None
-        assert state_hot.history[-1].shelf == WASTE
+    test_kitchen.dispatch_order(25, 999)
+
+    test_kitchen.dispatch_events[25].wait.assert_called_with(999)
+
+    assert state_hot.history[-1].added_at != None
+    assert state_hot.history[-1].removed_at != None
+    assert state_hot.history[-1].shelf == WASTE
