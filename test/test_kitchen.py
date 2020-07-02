@@ -9,6 +9,8 @@ from unittest.mock import Mock, patch
 from threading import Lock
 from collections import Counter
 
+from threading import Thread, Lock
+
 from orders_simulation.kitchen import Kitchen, set_logger, min_value
 from orders_simulation.kitchendata import load_orders, load_config, Order, OVERFLOW, WASTE, shelf_types
 from orders_simulation.orderstate import OrderState, ShelfHistory
@@ -27,7 +29,7 @@ def _order_hot(test_kitchen: Kitchen, life: int = 1):
 
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=life, decayRate=1)
-    state = OrderState(order, init_state=ShelfHistory(shelf="hot"))
+    state = OrderState(order, ShelfHistory("hot"), pickup_sec=10)
     test_kitchen.orders_state[25] = state
 
     return state
@@ -38,7 +40,7 @@ def _order_cold(test_kitchen: Kitchen, life: int = 1):
 
     order = Order(id="yyy", name="ice", temp="cold",
                   shelfLife=life, decayRate=1)
-    state = OrderState(order, init_state=ShelfHistory(shelf="cold"))
+    state = OrderState(order, ShelfHistory("cold"), pickup_sec=10)
     test_kitchen.orders_state[33] = state
 
     return state
@@ -76,10 +78,13 @@ def test_cleanup():
 
     # mock one order to return zero value
     state_hot.value = Mock(return_value=0.0)
-    test_kitchen.cleanup()
 
-    count_after = test_kitchen.shelves_count()
-    assert dict(count_after) == {WASTE: 1, "cold": 1}
+    with patch("time.sleep", Mock()):
+        Thread(target=test_kitchen.cleanup, daemon=True).start()
+        test_kitchen.cleanup_run_flag = False
+
+        count_after = test_kitchen.shelves_count()
+        assert dict(count_after) == {WASTE: 1, "cold": 1}
 
 
 def test_accept_orders():
@@ -343,6 +348,10 @@ def test_fulfill_order():
     order25 = Order(id="xxx", name="taco", temp="hot",
                     shelfLife=1, decayRate=1)
 
+    # making limits explicit and very close
+    test_kitchen.config.pickup_max_sec = 101
+    test_kitchen.config.pickup_max_sec = 102
+
     test_kitchen.make_room = Mock(return_value=OVERFLOW)
     test_kitchen.fulfill_order(25, order25)
 
@@ -355,24 +364,23 @@ def test_fulfill_order():
     assert test_kitchen.orders_state[25].order == order25
     assert test_kitchen.orders_state[25].history[0].shelf == OVERFLOW
     assert test_kitchen.orders_state[25].history[0].removed_at == None
+    assert test_kitchen.orders_state[25].pickup_sec == delay
 
 
 def test_dispatch_order_ok():
     """Pickup normal order"""
 
     test_kitchen = Kitchen(orders, config)
-
     state_hot = _order_hot(test_kitchen)
 
     assert test_kitchen.shelves_count()["hot"] == 1  # before
 
     with patch("time.sleep", Mock()):
-        test_kitchen.dispatch_order(25, 300)
+        test_kitchen.dispatch_order(25, 999)  # delay does not matter
 
         assert state_hot.history[-1].added_at != None
         assert state_hot.history[-1].removed_at != None
         assert state_hot.history[-1].shelf == "hot"
-        assert state_hot.pickup_sec == 300
 
         assert test_kitchen.shelves_count()["hot"] == 0  # after
 
@@ -386,12 +394,11 @@ def test_dispatch_order_wasted():
     state_hot.move(ShelfHistory(WASTE))
 
     with patch("time.sleep", Mock()):
-        test_kitchen.dispatch_order(25, 300)
+        test_kitchen.dispatch_order(25, 999)  # delay does not matter
 
         assert state_hot.history[-1].added_at != None
         assert state_hot.history[-1].removed_at != None
         assert state_hot.history[-1].shelf == WASTE
-        assert state_hot.pickup_sec == 300
 
 
 def test_run():

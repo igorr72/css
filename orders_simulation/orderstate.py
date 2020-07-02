@@ -9,10 +9,13 @@ from .kitchendata import Order
 @dataclass
 class ShelfHistory:
     shelf: str
-    added_at: float = time.time()
+    added_at: float = None
     removed_at: float = None
-    value: float = None
-    pickup_ttl: int = None
+    current_value: float = None
+
+    def __init__(self, shelf: str):
+        self.shelf = shelf
+        self.added_at = time.time()
 
 
 @dataclass
@@ -20,15 +23,12 @@ class OrderState:
     order: Order
     history: List[ShelfHistory]
     pickup_sec: int
-    last_ttl: int
-    last_value: float
+    last_value: float = None
 
-    def __init__(self, order: Order, init_state: ShelfHistory, pickup_sec: int = 300):
+    def __init__(self, order: Order, init_state: ShelfHistory, pickup_sec: int):
         self.order = order
         self.history = [init_state]
         self.pickup_sec = pickup_sec
-        self.last_ttl = self.ttl()
-        self.last_value = self.value()
 
     def close(self, value: float = None, removed_at: float = None):
         """Close last entry in history list with timestamp and value.
@@ -37,13 +37,11 @@ class OrderState:
         last_stage = self.history[-1]
         last_stage.removed_at = removed_at if removed_at else time.time()
 
-        # recalculate ttl and value
-        self.last_ttl = self.pickup_ttl()
-        self.last_value = value if value else self.value()
+        # recalculate value if not given
+        last_stage.current_value = value if value else self.value()
 
-        # store both values in closed last_stage
-        last_stage.pickup_ttl = self.last_ttl
-        last_stage.value = self.last_value
+        # store final order value in closed last_stage
+        self.last_value = last_stage.current_value
 
     def move(self, state: ShelfHistory, value: float = None):
         """Close last entry in history and immediately add a new state"""

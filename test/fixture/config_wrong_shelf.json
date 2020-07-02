@@ -7,7 +7,8 @@
       "FOOBAR": 25
     },
     "intake_orders_per_sec": 100,
-    "pickup_min_sec": 0.2,
-    "pickup_max_sec": 0.6
+    "pickup_min_sec": 2,
+    "pickup_max_sec": 3,
+    "cleanup_delay": 1.0
   }
   

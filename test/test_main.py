@@ -45,7 +45,7 @@ def test_run_main_debug(caplog):
             assert c["WARNING"] >= 3  # start, finish, stats messages
             assert c["INFO"] > 0
             assert c["DEBUG"] > 0
-            assert c["ERROR"] > 0
+            assert c["ERROR"] >= 0
 
         except SystemExit as e:
             assert e == None  # will fail if exception was raised by sys.exit()

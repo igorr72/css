@@ -59,6 +59,9 @@ class Kitchen:
         # Keep individual states for each order
         self.orders_state: Dict[int, OrderState] = {}
 
+        # the flag to stop running cleanup thread when needed
+        self.cleanup_run_flag: bool = True
+
     def input_delay(self) -> float:
         """Calculates a delay for a single order"""
 
@@ -67,15 +70,27 @@ class Kitchen:
     def cleanup(self) -> None:
         """Throw away orders with value <= 0"""
 
-        for order_num, state in self.active_orders():
-            val = state.value()
+        while self.cleanup_run_flag:
+            with self.lock:
+                count = 0
+                expired = 0
+                for order_num, state in self.active_orders():
+                    count += 1
+                    val = state.value()
 
-            if val <= 0:
-                state.move(state=ShelfHistory(shelf=WASTE), value=val)
+                    if val <= 0:
+                        expired += 1
+                        state.move(state=ShelfHistory(shelf=WASTE), value=val)
 
-                self.logger.error(
-                    f"order {order_num} became unhealthy, value: {val}")
-                self.logger.debug(f"order {order_num} details: {state}")
+                        self.logger.error(
+                            f"order {order_num} became unhealthy, value: {val}")
+                        self.logger.debug(
+                            f"order {order_num} details: {state}")
+
+                self.logger.debug(
+                    f"cleanup summary: checked {count} orders, expired {expired}")
+
+            time.sleep(self.config.cleanup_delay)
 
     def accept_orders(self) -> None:
         """Simulating real-world input queue"""
@@ -176,7 +191,7 @@ class Kitchen:
             state.move(ShelfHistory(shelf=state.order.temp))
 
             self.logger.warning(
-                f"order {order_num} recovered from {OVERFLOW} back to desired shelf")
+                f"order {order_num} RECOVERED from {OVERFLOW} back to desired shelf {state.order.temp}")
         else:
             # throw away the order with smallest TTL
             order_num, pickup_ttl = min_value(orders_ttl)
@@ -196,24 +211,29 @@ class Kitchen:
         """Dumps the current state of all shelves to logger"""
 
         for shelf, count in self.shelves_count().items():
-            capacity = self.config.capacity[shelf] if shelf in self.config.capacity else "UNLIMITED"
+            if shelf in self.config.capacity:
+                capacity = self.config.capacity[shelf]
+                status = "FULL" if count == capacity else "OK"
+            else:
+                capacity = "UNLIMITED"
+                status = "OK"
+
             self.logger.debug(
-                f"SNAPSHOT: shelf: {shelf}, count: {count}/{capacity}")
+                f"SNAPSHOT: shelf {shelf} is {status}: {count}/{capacity}")
 
     def fulfill_order(self, order_num: int, order: Order) -> None:
         """Main logic: create new state for the order; dispatch courier"""
 
         with self.lock:
-            # remove stale orders and get fresh count afterwards
-            self.cleanup()
+            # get fresh count of all orders from all shelves
             count = self.shelves_count()
 
             # find a proper shelf for new order
             shelf = self.make_room(count, order.temp)
 
             # simulate pickup delay
-            delay = int(random.uniform(
-                self.config.pickup_min_sec, self.config.pickup_max_sec))
+            delay = random.randint(
+                self.config.pickup_min_sec, self.config.pickup_max_sec)
 
             # add new order into our main data structure
             self.orders_state[order_num] = OrderState(
@@ -235,25 +255,25 @@ class Kitchen:
     def dispatch_order(self, order_num: int, delay: int) -> None:
         """Dispatch courier as soon as order is received"""
 
+        self.logger.debug(f"order {order_num} pickup delay {delay}")
         time.sleep(delay)
 
         with self.lock:
-            # remove all stale orders before attempting to pickup specific order
-            self.cleanup()
-
             # close current order whether it was just moved to waste by cleanup or not
             state = self.orders_state[order_num]
             state.close()
 
             last_shelf = state.history[-1]
 
+            order_life = last_shelf.removed_at - state.history[0].added_at
+
             if last_shelf.shelf == WASTE:
                 when = last_shelf.removed_at - last_shelf.added_at
                 self.logger.error(
-                    f"delivery failed as order {order_num} wasted {when} sec ago")
+                    f"order {order_num} took {order_life} sec, FAILED, expired {when} sec ago")
             else:
                 self.logger.info(
-                    f"order {order_num} delivered successfully from shelf {last_shelf.shelf}; value: {state.last_value}")
+                    f"order {order_num} took {order_life} sec, DELIVERED from shelf {last_shelf.shelf}, value: {state.last_value}")
 
             self.logger.debug(f"order {order_num} details: {state}")
 
@@ -266,13 +286,20 @@ class Kitchen:
         self.logger.warning(
             f"Start kitchen: order count={len(self.orders)}")
 
-        # consume from order queue at given rate
+        # start cleanup process in background
+        cleanup = Thread(target=self.cleanup, name=f"cleanup", daemon=True)
+        cleanup.start()
+
+        # consume from order queue at given rate in main thread
         self.accept_orders()
 
         # waiting for all dispatched couriers to finish
         while not self.dispatch_queue.empty():
             t = self.dispatch_queue.get()
             t.join()
+
+        # stop cleanup thread
+        self.cleanup_run_flag = False
 
         self.logger.warning(
             f"Stop kitchen: unfinished orders={len(self.unfinished_orders())}")
