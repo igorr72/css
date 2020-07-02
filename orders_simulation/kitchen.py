@@ -94,7 +94,7 @@ class Kitchen:
 
                     if val <= 0:
                         self.logger.error(
-                            f"order {order_num} became UNHEALTHY after {state.total_age()} sec, value: {val}")
+                            f"order {order_num} STATUS=unhealthy age={state.total_age()}, value={val}")
 
                         expired += 1
                         state.move_to_waste(value=val)
@@ -209,13 +209,13 @@ class Kitchen:
             state.move(ShelfHistory(shelf=state.order.temp))
 
             self.logger.warning(
-                f"order {order_num} RECOVERED from {OVERFLOW} back to desired shelf {state.order.temp}")
+                f"order {order_num} STATUS=recovered from {OVERFLOW} back to desired shelf {state.order.temp}")
         else:
             # throw away the order with smallest TTL
             order_num, pickup_ttl = min_value(orders_ttl)
 
             self.logger.error(
-                f"order {order_num} with lowest pickup_ttl={pickup_ttl} goes to {WASTE}")
+                f"order {order_num} STATUS=discarded (no space) with lowest pickup_ttl={pickup_ttl}")
 
             self.orders_state[order_num].move_to_waste()
             self.terminate_delivery(order_num)
@@ -261,7 +261,7 @@ class Kitchen:
                 order=order, init_state=ShelfHistory(shelf), pickup_sec=delay)
 
             self.logger.info(
-                f"put new order {order_num} onto shelf {shelf}; pickup in {delay} sec")
+                f"order {order_num} STATUS=new shelf={shelf}; pickup in {delay} sec")
 
             # dumps fresh counters after new order was added
             self.snapshot()
@@ -288,12 +288,12 @@ class Kitchen:
 
             if state.current_shelf() == WASTE:
                 self.logger.error(
-                    f"order {order_num} took {state.total_age()} sec, PICKUP CANCELLED, expired {state.current_age()} sec ago")
+                    f"order {order_num} STATUS=pickup_canceled age={state.total_age()}")
             else:
                 state.close()
 
                 self.logger.info(
-                    f"order {order_num} took {state.total_age()} sec, DELIVERED from shelf {state.current_shelf()}, value: {state.last_value}")
+                    f"order {order_num} STATUS=delivered age={state.total_age()}, value={state.last_value}")
 
             self.logger.debug(f"order {order_num} details: {state}")
 
