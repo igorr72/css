@@ -82,13 +82,16 @@ class Kitchen:
                         expired += 1
                         state.move(state=ShelfHistory(shelf=WASTE), value=val)
 
+                        age = time.time() - state.history[0].added_at
+
                         self.logger.error(
-                            f"order {order_num} became unhealthy, value: {val}")
+                            f"order {order_num} became unhealthy after {age} sec, value: {val}")
                         self.logger.debug(
                             f"order {order_num} details: {state}")
 
-                self.logger.debug(
-                    f"cleanup summary: checked {count} orders, expired {expired}")
+                if expired > 0:
+                    self.logger.debug(
+                        f"cleanup summary: checked {count} orders, expired {expired}")
 
             time.sleep(self.config.cleanup_delay)
 
@@ -210,16 +213,19 @@ class Kitchen:
     def snapshot(self):
         """Dumps the current state of all shelves to logger"""
 
-        for shelf, count in self.shelves_count().items():
+        counter = self.shelves_count()
+
+        for shelf in shelf_types + [OVERFLOW, WASTE]:
+            count = counter[shelf]
             if shelf in self.config.capacity:
                 capacity = self.config.capacity[shelf]
                 status = "FULL" if count == capacity else "OK"
             else:
                 capacity = "UNLIMITED"
-                status = "OK"
+                status = "--->"
 
             self.logger.debug(
-                f"SNAPSHOT: shelf {shelf} is {status}: {count}/{capacity}")
+                f"SNAPSHOT: shelf {shelf.ljust(9)} {status.ljust(4)} {count}/{capacity}")
 
     def fulfill_order(self, order_num: int, order: Order) -> None:
         """Main logic: create new state for the order; dispatch courier"""
@@ -282,7 +288,7 @@ class Kitchen:
 
         set_logger(debug_level)
 
-        self.logger.info(f"Config: {self.config}")
+        self.logger.info(self.config)
         self.logger.warning(
             f"Start kitchen: order count={len(self.orders)}")
 

@@ -399,13 +399,3 @@ def test_dispatch_order_wasted():
         assert state_hot.history[-1].added_at != None
         assert state_hot.history[-1].removed_at != None
         assert state_hot.history[-1].shelf == WASTE
-
-
-def test_run():
-    """Make sure all orders were processed/dispatched"""
-
-    test_kitchen = Kitchen(orders, config)
-    test_kitchen.run()
-
-    assert len(orders) > 0
-    assert len(test_kitchen.orders_state) == len(orders)
