@@ -5,7 +5,7 @@
     "frozen": 10,
     "overflow": 15
   },
-  "intake_orders_per_sec": 0.1,
+  "intake_orders_per_sec": 0.13,
   "pickup_min_sec": 100,
   "pickup_max_sec": 300,
   "cleanup_delay": 1.0
