@@ -343,6 +343,6 @@ class Kitchen:
         self.logger.warning(
             f"Stop kitchen: unfinished orders={len(self.active_orders())}")
 
-        wasted = self.shelf_orders(WASTE)
+        wasted = self.waste_orders()
         self.logger.warning(f"Wasted orders count={len(wasted)}")
         self.logger.debug(f"Wasted orders details: {wasted}")
