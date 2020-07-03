@@ -24,24 +24,24 @@ orders = load_orders(orders_path, errors_sink=sys.stderr)
 config = load_config(config_path, errors_sink=sys.stderr)
 
 
-def _order_hot(test_kitchen: Kitchen, life: int = 1):
+def _order_hot(test_kitchen: Kitchen, life: int = 1, order_num: int = 25):
     """Helper: generate test order #25 added to hot shelf"""
 
     order = Order(id="xxx", name="taco", temp="hot",
                   shelfLife=life, decayRate=1)
     state = OrderState(order, ShelfHistory("hot"), pickup_sec=10)
-    test_kitchen.orders_state[25] = state
+    test_kitchen.orders_state[order_num] = state
 
     return state
 
 
-def _order_cold(test_kitchen: Kitchen, life: int = 1):
+def _order_cold(test_kitchen: Kitchen, life: int = 1, order_num: int = 33):
     """Helper: generate test order #33 added to cold shelf"""
 
     order = Order(id="yyy", name="ice", temp="cold",
                   shelfLife=life, decayRate=1)
     state = OrderState(order, ShelfHistory("cold"), pickup_sec=10)
-    test_kitchen.orders_state[33] = state
+    test_kitchen.orders_state[order_num] = state
 
     return state
 
@@ -65,25 +65,186 @@ def test_min_value():
     assert min_value(d) == (3, -0.1)
 
 
-def test_cleanup():
-    """Should remove one order to waste but keep the other one"""
+def test_terminate_delivery():
+    """Should call Event.set() for a partucular order"""
+
+    test_kitchen = Kitchen(orders, config)
+
+    test_kitchen.dispatch_events[55] = Mock()
+
+    test_kitchen.terminate_delivery(55)
+
+    test_kitchen.dispatch_events[55].set.assert_called()
+
+
+def test_active_orders():
+    """Test if active orders include waste shelf (they should NOT)"""
+
+    test_kitchen = Kitchen(orders, config)
+
+    state_hot = _order_hot(test_kitchen)
+    state_cold = _order_cold(test_kitchen)
+
+    assert test_kitchen.active_orders() == {25: state_hot, 33: state_cold}
+
+    # now move cold order to waste
+    state_cold.move_to_waste()
+    assert test_kitchen.active_orders() == {25: state_hot}
+
+    # now close hot order
+    state_hot.close()
+    assert test_kitchen.active_orders() == {}
+
+
+def test_waste_orders():
+    """Test if active orders include waste shelf (they should NOT)"""
+
+    test_kitchen = Kitchen(orders, config)
+    state_cold = _order_cold(test_kitchen)
+
+    assert test_kitchen.waste_orders() == {}
+
+    # now move cold order to waste
+    state_cold.move_to_waste()
+
+    assert test_kitchen.waste_orders() == {33: state_cold}
+
+
+def test_shelf_orders():
+    """Test orders placed on particular shelf"""
+
+    test_kitchen = Kitchen(orders, config)
+
+    state_hot = _order_hot(test_kitchen)
+    state_cold = _order_cold(test_kitchen)
+
+    assert test_kitchen.shelf_orders("hot") == {25: state_hot}
+    assert test_kitchen.shelf_orders("cold") == {33: state_cold}
+
+    # now move cold order to waste
+    state_cold.move_to_waste()
+    assert test_kitchen.shelf_orders("cold") == {}
+
+    # now close hot order
+    state_hot.close()
+    assert test_kitchen.shelf_orders("hot") == {}
+
+
+def test_count_shelves():
+    """Test all active orders are included as well as all waste orders"""
+
+    test_kitchen = Kitchen(orders, config)
+
+    state_hot = _order_hot(test_kitchen)
+    state_cold = _order_cold(test_kitchen)
+
+    assert test_kitchen.count_shelves() == {"hot": 1, "cold": 1}
+
+    # now move cold order to waste
+    state_cold.move_to_waste()
+    assert test_kitchen.count_shelves() == {"hot": 1, "waste": 1}
+
+    # now close hot order
+    state_hot.close()
+    assert test_kitchen.count_shelves() == {"waste": 1}
+
+
+def test_remove_unhealty():
+    """Should remove orders with value <=0"""
 
     test_kitchen = Kitchen(orders, config)
 
     state_hot = _order_hot(test_kitchen)
     _order_cold(test_kitchen)
 
-    assert test_kitchen.shelves_count() == {"hot": 1, "cold": 1}
+    assert test_kitchen.count_shelves() == {"hot": 1, "cold": 1}
 
     # mock one order to return zero value
     state_hot.value = Mock(return_value=-1.0)
     test_kitchen.terminate_delivery = Mock()
 
-    test_kitchen.cleanup_event.set()
-    test_kitchen.cleanup()
+    active, expired = test_kitchen.remove_unhealty()
+
+    assert active == 2
+    assert expired == 1
 
     test_kitchen.terminate_delivery.assert_called_with(25)
-    assert test_kitchen.shelves_count() == {WASTE: 1, "cold": 1}
+    assert test_kitchen.count_shelves() == {WASTE: 1, "cold": 1}
+
+
+def test_find_recoverable_orders():
+    """Find orders in overflow shelf that could be moved"""
+
+    test_kitchen = Kitchen(orders, config)
+
+    state_hot = _order_hot(test_kitchen)
+    state_cold = _order_cold(test_kitchen)
+
+    # moving both to overflow to make them recoverable
+    state_hot.move(ShelfHistory(OVERFLOW))
+    state_cold.move(ShelfHistory(OVERFLOW))
+
+    # add more orders so the active counters will be > 0
+    _order_hot(test_kitchen, order_num=55)
+    _order_cold(test_kitchen, order_num=66)
+
+    # simulate capacity
+    test_kitchen.config.capacity["hot"] = 5
+    test_kitchen.config.capacity["cold"] = 4
+
+    assert math.isclose(test_kitchen.find_recoverable_orders()[25], 1/5)
+    assert math.isclose(test_kitchen.find_recoverable_orders()[33], 1/4)
+
+
+def test_recover_from_overflow():
+    """Check if order with lowest utilization is recovered"""
+
+    test_kitchen = Kitchen(orders, config)
+
+    state_hot = _order_hot(test_kitchen)
+    state_cold = _order_cold(test_kitchen)
+
+    # moving both to overflow to make them recoverable
+    state_hot.move(ShelfHistory(OVERFLOW))
+    state_cold.move(ShelfHistory(OVERFLOW))
+
+    assert state_hot.current_shelf() == OVERFLOW
+    assert state_cold.current_shelf() == OVERFLOW
+
+    # Mock the return
+    test_kitchen.find_recoverable_orders = Mock(
+        return_value={25: 1/5, 33: 1/4}
+    )
+
+    recovered = test_kitchen.recover_from_overflow()
+
+    assert recovered == 1
+    assert state_hot.current_shelf() == "hot"
+    assert state_cold.current_shelf() == OVERFLOW
+
+
+def test_cleanup():
+    """Should remove unhealthy and recover from overflow"""
+
+    test_kitchen = Kitchen(orders, config)
+
+    # mocking delay value
+    test_kitchen.config.cleanup_delay = 55
+
+    # mock two main methods
+    test_kitchen.remove_unhealty = Mock(return_value=(2, 1))
+    test_kitchen.recover_from_overflow = Mock(return_value=1)
+
+    # check the delay
+    test_kitchen.cleanup_event = Mock()
+    test_kitchen.cleanup_event.wait = Mock()
+
+    # Execute main method
+    test_kitchen.cleanup()
+
+    test_kitchen.remove_unhealty.assert_called()
+    test_kitchen.recover_from_overflow.assert_called()
+    test_kitchen.cleanup_event.wait.assert_called_with(55)
 
 
 def test_accept_orders():
@@ -118,129 +279,13 @@ def test_accept_orders():
             delay_total, test_kitchen.input_delay() * len(orders))
 
 
-def test_shelf_orders():
-    """Test if returns orders from correct shelf"""
-
-    test_kitchen = Kitchen(orders, config)
-
-    state_hot = _order_hot(test_kitchen)
-    state_cold = _order_cold(test_kitchen)
-
-    assert test_kitchen.shelf_orders("hot") == [(25, state_hot)]
-    assert test_kitchen.shelf_orders("cold") == [(33, state_cold)]
-
-    # now move cold order to waste
-    state_cold.move(ShelfHistory(WASTE))
-
-    assert test_kitchen.shelf_orders("cold") == []
-    assert test_kitchen.shelf_orders(WASTE) == [(33, state_cold)]
-
-
-def test_unfinished_orders():
-    """Test if unfinished orders include waste shelf (they should)"""
-
-    test_kitchen = Kitchen(orders, config)
-
-    state_hot = _order_hot(test_kitchen)
-    state_cold = _order_cold(test_kitchen)
-
-    assert (25, state_hot) in test_kitchen.unfinished_orders()
-    assert (33, state_cold) in test_kitchen.unfinished_orders()
-
-    # now move cold order to waste
-    state_cold.move(ShelfHistory(WASTE))
-    assert (33, state_cold) in test_kitchen.unfinished_orders()
-
-    # now close the state
-    state_cold.close()
-    assert (33, state_cold) not in test_kitchen.unfinished_orders()
-
-
-def test_active_orders():
-    """Test if active orders include waste shelf (they should NOT)"""
-
-    test_kitchen = Kitchen(orders, config)
-
-    state_hot = _order_hot(test_kitchen)
-    state_cold = _order_cold(test_kitchen)
-
-    assert (25, state_hot) in test_kitchen.active_orders()
-    assert (33, state_cold) in test_kitchen.active_orders()
-
-    # now move cold order to waste
-    state_cold.move(ShelfHistory(WASTE))
-    assert (33, state_cold) not in test_kitchen.active_orders()
-
-    # now close hot order
-    state_hot.close()
-    assert test_kitchen.active_orders() == []
-
-
-def test_shelves_count():
-    """Test all active orders are included as well as all waste orders"""
-
-    test_kitchen = Kitchen(orders, config)
-
-    state_hot = _order_hot(test_kitchen)
-    state_cold = _order_cold(test_kitchen)
-
-    assert test_kitchen.shelves_count() == {"hot": 1, "cold": 1}
-
-    # now move cold order to waste
-    state_cold.move(ShelfHistory(WASTE))
-    assert test_kitchen.shelves_count() == {"hot": 1, "waste": 1}
-
-    # now close hot order
-    state_hot.close()
-    assert test_kitchen.shelves_count() == {"waste": 1}
-
-    # finally, close waste order ==> counters still there!
-    state_cold.close()
-    assert test_kitchen.shelves_count() == {"waste": 1}
-
-
-def test_find_recoverable_orders():
-    """Test all active orders are included as well as all waste orders"""
-
-    test_kitchen = Kitchen(orders, config)
-
-    state_hot = _order_hot(test_kitchen)
-    state_cold = _order_cold(test_kitchen)
-
-    # moving both to overflow to make them recoverable
-    state_hot.move(ShelfHistory(OVERFLOW))
-    state_cold.move(ShelfHistory(OVERFLOW))
-
-    # build a proper countero bject
-    counter = test_kitchen.shelves_count()
-
-    # simulate load
-    counter["hot"] = 1
-    counter["cold"] = 2
-
-    # simulate capacity
-    test_kitchen.config.capacity["hot"] = 5
-    test_kitchen.config.capacity["cold"] = 4
-
-    assert test_kitchen.find_recoverable_orders(
-        counter, [25, 33]) == {25: 0.2, 33: 0.5}
-
-    # now adjust hot counter to simulate hot shelf reaching capacity
-    counter["hot"] = test_kitchen.config.capacity["hot"]
-
-    assert test_kitchen.find_recoverable_orders(
-        counter, [25, 33]) == {33: 0.5}
-
-
 def test_make_room_ok():
     """Simple cases: all shelves have room"""
 
     test_kitchen = Kitchen(orders, config)
 
-    counter = test_kitchen.shelves_count()
-
     for shelf in shelf_types:
-        assert test_kitchen.make_room(counter, shelf) == shelf
+        assert test_kitchen.make_room(shelf) == shelf
 
 
 def test_make_room_overflow():
@@ -248,12 +293,11 @@ def test_make_room_overflow():
 
     test_kitchen = Kitchen(orders, config)
 
-    counter = test_kitchen.shelves_count()
-
     for shelf in shelf_types:
         # simulate reaching capacity
-        counter[shelf] = test_kitchen.config.capacity[shelf]
-        assert test_kitchen.make_room(counter, shelf) == OVERFLOW
+        test_kitchen.config.capacity[shelf] = 0
+
+        assert test_kitchen.make_room(shelf) == OVERFLOW
 
 
 def test_make_room_recovery():
@@ -268,31 +312,23 @@ def test_make_room_recovery():
     state_hot.move(ShelfHistory(OVERFLOW))
     state_cold.move(ShelfHistory(OVERFLOW))
 
-    # build a proper counter object
-    counter = test_kitchen.shelves_count()
+    assert state_hot.current_shelf() == OVERFLOW
+    assert state_cold.current_shelf() == OVERFLOW
 
-    # simulate load
-    counter["hot"] = 1
-    counter["cold"] = 2
+    # Mock the return
+    test_kitchen.find_recoverable_orders = Mock(
+        return_value={25: 1/5, 33: 1/4}
+    )
 
-    # simulate capacity
-    test_kitchen.config.capacity["hot"] = 5
-    test_kitchen.config.capacity["cold"] = 4
+    # Mock the full capacity
+    test_kitchen.config.capacity["frozen"] = 0
+    test_kitchen.config.capacity[OVERFLOW] = 2
 
-    assert test_kitchen.find_recoverable_orders(
-        counter, [25, 33]) == {25: 0.2, 33: 0.5}
-
-    # simulate frozen & OVERFLOW are full
-    counter["frozen"] = test_kitchen.config.capacity["frozen"]
-    counter[OVERFLOW] = test_kitchen.config.capacity[OVERFLOW]
-
-    avail_shelf = test_kitchen.make_room(counter, "frozen")
+    # Run the main test command
+    avail_shelf = test_kitchen.make_room("frozen")
 
     assert avail_shelf == OVERFLOW
-
-    # make_room_ supposed to recover order with lowest utilization score 0.2 (hot)
-    assert state_hot.history[-1].shelf == "hot"
-    assert state_cold.history[-1].shelf == OVERFLOW
+    assert state_hot.current_shelf() == "hot"
 
 
 def test_make_room_removal():
@@ -300,36 +336,30 @@ def test_make_room_removal():
 
     test_kitchen = Kitchen(orders, config)
 
-    state_hot = _order_hot(test_kitchen, life=100)
-    state_cold = _order_cold(test_kitchen, life=200)
+    state_hot = _order_hot(test_kitchen, life=200)
+    state_cold = _order_cold(test_kitchen, life=100)
 
     # moving both to overflow to make them recoverable
     state_hot.move(ShelfHistory(OVERFLOW))
     state_cold.move(ShelfHistory(OVERFLOW))
 
-    # build a proper counter object
-    counter = test_kitchen.shelves_count()
-
-    # simulate OVERFLOW  and other shelves are full
-    counter[OVERFLOW] = test_kitchen.config.capacity[OVERFLOW]
-    counter["hot"] = test_kitchen.config.capacity["hot"]
-    counter["cold"] = test_kitchen.config.capacity["cold"]
-
-    # making sure there is nothing to recover...
-    assert test_kitchen.find_recoverable_orders(counter, [25, 33]) == {}
+    # Mock the full capacity
+    test_kitchen.config.capacity["frozen"] = 0
+    test_kitchen.config.capacity["hot"] = 0
+    test_kitchen.config.capacity["cold"] = 0
+    test_kitchen.config.capacity[OVERFLOW] = 2
 
     # disable terminate_delivery method
     test_kitchen.terminate_delivery = Mock()
 
-    avail_shelf = test_kitchen.make_room(counter, "cold")
+    # Run the main test command
+    avail_shelf = test_kitchen.make_room("frozen")
 
-    test_kitchen.terminate_delivery.assert_called_with(25)
     assert avail_shelf == OVERFLOW
 
-    # make_room_ supposed to remove order with lowest pickup_ttl which
-    # which is proportional to shelfLife, i.e. shorter life dies first
-    assert state_hot.history[-1].shelf == WASTE
-    assert state_cold.history[-1].shelf == OVERFLOW
+    # should remove order with smallest TTL (shortest life -> cold)
+    assert state_cold.current_shelf() == WASTE
+    assert state_cold.closed() == True
 
 
 def test_fulfill_order():
@@ -365,8 +395,8 @@ def test_fulfill_order():
     assert not test_kitchen.dispatch_queue.empty()
     assert 25 in test_kitchen.orders_state
     assert test_kitchen.orders_state[25].order == order25
-    assert test_kitchen.orders_state[25].history[0].shelf == OVERFLOW
-    assert test_kitchen.orders_state[25].history[0].removed_at == None
+    assert test_kitchen.orders_state[25].current_shelf() == OVERFLOW
+    assert test_kitchen.orders_state[25].closed() == False
     assert test_kitchen.orders_state[25].pickup_sec == delay
 
 
@@ -376,7 +406,7 @@ def test_dispatch_order_ok():
     test_kitchen = Kitchen(orders, config)
     state_hot = _order_hot(test_kitchen)
 
-    assert test_kitchen.shelves_count()["hot"] == 1  # before
+    assert test_kitchen.count_shelves()["hot"] == 1  # before
 
     # Making a fake Event
     test_kitchen.dispatch_events[25] = Mock()
@@ -390,7 +420,7 @@ def test_dispatch_order_ok():
     assert state_hot.history[-1].removed_at != None
     assert state_hot.history[-1].shelf == "hot"
 
-    assert test_kitchen.shelves_count()["hot"] == 0  # after
+    assert test_kitchen.count_shelves()["hot"] == 0  # after
 
 
 def test_dispatch_order_wasted():

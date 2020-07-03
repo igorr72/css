@@ -30,8 +30,11 @@ class OrderState:
         self.history = [init_state]
         self.pickup_sec = pickup_sec
 
-    def current_shelf(self):
+    def current_shelf(self) -> str:
         return self.history[-1].shelf
+
+    def closed(self) -> bool:
+        return self.history[-1].removed_at != None
 
     def current_age(self):
         if self.history[-1].removed_at:
@@ -45,14 +48,15 @@ class OrderState:
         """Close last entry in history list with timestamp and value.
         It can be called directly, but mostly from append_state() method"""
 
-        last_stage = self.history[-1]
-        last_stage.removed_at = removed_at if removed_at else time.time()
+        if not self.closed():
+            last_stage = self.history[-1]
+            last_stage.removed_at = removed_at if removed_at else time.time()
 
-        # recalculate value if not given
-        last_stage.current_value = value if value else self.value()
+            # recalculate value if not given
+            last_stage.current_value = value if value else self.value()
 
-        # store final order value in closed last_stage
-        self.last_value = last_stage.current_value
+            # store final order value in closed last_stage
+            self.last_value = last_stage.current_value
 
     def move(self, state: ShelfHistory, value: float = None) -> float:
         """Close last entry in history and immediately add a new state"""
@@ -71,6 +75,9 @@ class OrderState:
 
         now = self.move(ShelfHistory(WASTE), value=value)
         self.close(removed_at=now)
+
+        # copy value from previous state as we closed it immedeately
+        self.history[-1].current_value = self.history[-2].current_value
 
     def decay_modifiers(self) -> List[int]:
         return [

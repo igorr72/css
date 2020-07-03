@@ -21,6 +21,102 @@ def _order_hot(life: int = 1, decay: float = 1.0, pickup_sec: int = 1):
     return state
 
 
+def test_current_shelf():
+    """Should return shelf name from last state"""
+
+    state = _order_hot()
+    assert state.current_shelf() == "hot"
+
+    state.move(ShelfHistory(OVERFLOW))
+    assert state.current_shelf() == OVERFLOW
+
+
+def test_closed():
+    """Should return True if last state is closed"""
+
+    state = _order_hot()
+    assert state.closed() == False
+
+    state.close()
+    assert state.closed() == True
+
+
+def test_current_age_closed():
+    """Should calculate the age of current state"""
+
+    state = _order_hot()
+
+    # simulate two
+    state.history[0].added_at = 1.1
+    state.history[0].removed_at = 3.1
+
+    assert state.closed() == True
+    assert math.isclose(state.current_age(), 2.0)
+
+
+def test_current_age_opened():
+    """Should calculate the age of current state"""
+
+    state = _order_hot()
+    assert state.closed() == False
+
+    with patch("time.time", Mock(return_value=state.history[0].added_at + 1.5)):
+        assert math.isclose(state.current_age(), 1.5)
+
+
+def test_close():
+    """Should close current (opened) state"""
+
+    state = _order_hot()
+    assert state.closed() == False
+
+    state.close(value=2.0, removed_at=state.history[0].added_at + 1.5)
+
+    assert state.closed() == True
+    assert math.isclose(state.current_age(), 1.5)
+    assert state.history[-1].current_value == 2.0
+
+    # try to close one more time with different values
+    state.close(value=2.0, removed_at=state.history[0].added_at + 2.5)
+
+    # unchanged
+    assert state.closed() == True
+    assert math.isclose(state.current_age(), 1.5)
+    assert state.history[-1].current_value == 2.0
+
+
+def test_move():
+    """Should close current (opened) state and append new state"""
+
+    state = _order_hot()
+    assert state.closed() == False
+
+    state.move(ShelfHistory("cold"), value=2.0)
+
+    assert state.closed() == False
+    assert len(state.history) == 2
+    assert state.history[0].removed_at == state.history[1].added_at
+    assert math.isclose(state.history[0].current_value, 2.0)
+
+
+def test_move_to_waste():
+    """Should close current (opened) state and append new state"""
+
+    state = _order_hot()
+    assert state.closed() == False
+
+    state.move_to_waste(value=2.0)
+
+    assert state.closed() == True
+    assert len(state.history) == 2
+
+    assert state.history[0].removed_at == state.history[1].added_at
+    assert state.history[1].removed_at == state.history[1].added_at
+
+    assert math.isclose(state.history[0].current_value, 2.0)
+    assert math.isclose(state.history[1].current_value, 2.0)
+
+
 def test_decay_modifiers():
     """Decay modifier should be different for OVERFLOW and normal shelves"""
 

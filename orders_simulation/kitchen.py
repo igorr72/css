@@ -79,33 +79,119 @@ class Kitchen:
         self.logger.debug(
             f"order {order_num} sending Event signal to terminate delivery")
 
+    def active_orders(self) -> Dict[int, OrderState]:
+        """Active orders from every shelf except WASTE.
+        WASTE shelf orders are always in closed state."""
+
+        return {
+            order_num: state
+            for order_num, state in self.orders_state.items()
+            if not state.closed()
+        }
+
+    def waste_orders(self) -> Dict[int, OrderState]:
+        """All orders from waste shelf (historical)"""
+
+        return {
+            order_num: state
+            for order_num, state in self.orders_state.items()
+            if state.current_shelf() == WASTE
+        }
+
+    def shelf_orders(self, shelf: str) -> Dict[int, OrderState]:
+        """Active orders from a particular shelf"""
+
+        return {
+            order_num: state
+            for order_num, state in self.active_orders().items()
+            if state.current_shelf() == shelf
+        }
+
+    def count_shelves(self) -> Counter:
+        """Get a snapshot of all orders and return a count for orders on each shelf"""
+
+        # only active orders for normal shelfs
+        shelves_names = [
+            state.current_shelf()
+            for _, state in self.active_orders().items()
+        ]
+
+        # all orders (historical) for the [virtual] WASTE shelf
+        waste_names = [WASTE for _ in self.waste_orders()]
+
+        return Counter(shelves_names + waste_names)
+
+    def remove_unhealty(self) -> Tuple[int, int]:
+        """Throw away orders with value <= 0. 
+        Returs two counters: (active_orders, expired_orders)."""
+
+        active = 0
+        expired = 0
+
+        for order_num, state in self.active_orders().items():
+            active += 1
+            val = state.value()
+
+            if val <= 0:
+                self.logger.error(
+                    f"order {order_num} STATUS=unhealthy age={state.total_age()}, value={val}")
+
+                expired += 1
+                state.move_to_waste(value=val)
+                self.terminate_delivery(order_num)
+
+                self.logger.debug(
+                    f"order {order_num} details: {state}")
+
+        return active, expired
+
+    def find_recoverable_orders(self) -> Dict[int, float]:
+        """Check all non-OVERFLOW shelves to find ones that are not full"""
+
+        recoverable = {}
+        counter = self.count_shelves()
+
+        for order_num, state in self.shelf_orders(OVERFLOW).items():
+            desired_shelf = state.order.temp
+            if counter[desired_shelf] < self.config.capacity[desired_shelf]:
+                util = counter[desired_shelf] / \
+                    self.config.capacity[desired_shelf]
+                recoverable[order_num] = util
+
+        return recoverable
+
+    def recover_from_overflow(self) -> int:
+        """Recover one order from overflow shelf, if possible"""
+
+        recoverable = self.find_recoverable_orders()
+
+        if recoverable:
+            # will recover order with smallest shelf utilization (i.e. more free space)
+            order_num, _ = min_value(recoverable)
+
+            state = self.orders_state[order_num]
+            state.move(ShelfHistory(shelf=state.order.temp))
+
+            self.logger.warning(
+                f"order {order_num} STATUS=recovered from {OVERFLOW} back to desired shelf {state.order.temp}")
+
+            return 1  # one order recovered
+
+        return 0  # did not recover anything
+
     def cleanup(self) -> None:
-        """Throw away orders with value <= 0"""
+        """Run periodic checks for unhealthy orders and overflow orders"""
 
         while True:
             self.cleanup_event.wait(self.config.cleanup_delay)
 
             with self.lock:
-                count = 0
-                expired = 0
-                for order_num, state in self.active_orders():
-                    count += 1
-                    val = state.value()
+                active, expired = self.remove_unhealty()
+                recovered = self.recover_from_overflow()
 
-                    if val <= 0:
-                        self.logger.error(
-                            f"order {order_num} STATUS=unhealthy age={state.total_age()}, value={val}")
-
-                        expired += 1
-                        state.move_to_waste(value=val)
-                        self.terminate_delivery(order_num)
-
-                        self.logger.debug(
-                            f"order {order_num} details: {state}")
-
-                if expired > 0:
-                    self.logger.debug(
-                        f"cleanup summary: checked {count} orders, expired {expired}")
+            if expired > 0 or recovered > 0:
+                self.logger.debug(
+                    f"cleanup summary: checked {active} orders, expired {expired}, recovered {recovered}")
 
             if self.cleanup_event.is_set():
                 break
@@ -123,63 +209,11 @@ class Kitchen:
                 order_num, order,), name=f"fulfill_order_{order_num}", daemon=True)
             fulfill.start()
 
-    def shelf_orders(self, shelf: str) -> List[Tuple[int, OrderState]]:
-        """Return a list of orders for a particular shelf"""
-
-        return [
-            (order_num, state)
-            for order_num, state in self.orders_state.items()
-            if state.history[-1].shelf == shelf
-        ]
-
-    def unfinished_orders(self):
-        """Generate a list of active orders for any shelf"""
-
-        return [
-            (order_num, state)
-            for order_num, state in self.orders_state.items()
-            if state.history[-1].removed_at == None
-        ]
-
-    def active_orders(self):
-        """Generate a list of active orders except WASTE"""
-
-        return [
-            (order_num, state)
-            for order_num, state in self.unfinished_orders()
-            if state.history[-1].shelf != WASTE
-        ]
-
-    def shelves_count(self) -> Counter:
-        """Get a snapshot of all orders and return a count for orders on each shelf"""
-
-        # only active orders for normal shelfs
-        shelves_names = [
-            state.history[-1].shelf
-            for _, state in self.active_orders()
-        ]
-
-        # all orders (historical) for the [virtual] WASTE shelf
-        waste_names = [WASTE for _ in self.shelf_orders(WASTE)]
-
-        return Counter(shelves_names + waste_names)
-
-    def find_recoverable_orders(self, count: Counter, order_nums: List[int]) -> Dict[int, float]:
-        """Check all non-OVERFLOW shelves to find ones that are not full"""
-
-        recoverable = {}
-
-        for order_num in order_nums:
-            shelf = self.orders_state[order_num].order.temp
-            if count[shelf] < self.config.capacity[shelf]:
-                utilization = count[shelf] / self.config.capacity[shelf]
-                recoverable[order_num] = utilization
-
-        return recoverable
-
-    def make_room(self, count: Counter, desired_shelf: str) -> str:
+    def make_room(self, desired_shelf: str) -> str:
         """Returns a shelf name where to put a new order. This function might modify
         the other orders states to make room if all shelfs are full"""
+
+        count = self.count_shelves()
 
         if count[desired_shelf] < self.config.capacity[desired_shelf]:
             return desired_shelf
@@ -193,24 +227,13 @@ class Kitchen:
         self.logger.warning(
             f"{OVERFLOW} shelf is FULL ({count[OVERFLOW]}/{self.config.capacity[OVERFLOW]})")
 
-        orders_ttl = {
-            order_num: state.pickup_ttl()
-            for order_num, state in self.shelf_orders(OVERFLOW)
-            if state.history[-1].removed_at == None  # active orders only
-        }
+        if self.recover_from_overflow() == 0:
 
-        recoverable = self.find_recoverable_orders(count, orders_ttl.keys())
+            orders_ttl = {
+                order_num: state.pickup_ttl()
+                for order_num, state in self.shelf_orders(OVERFLOW).items()
+            }
 
-        if recoverable:
-            # will recover order with smallest shelf utilization (i.e. more free space)
-            order_num, _ = min_value(recoverable)
-
-            state = self.orders_state[order_num]
-            state.move(ShelfHistory(shelf=state.order.temp))
-
-            self.logger.warning(
-                f"order {order_num} STATUS=recovered from {OVERFLOW} back to desired shelf {state.order.temp}")
-        else:
             # throw away the order with smallest TTL
             order_num, pickup_ttl = min_value(orders_ttl)
 
@@ -220,15 +243,15 @@ class Kitchen:
             self.orders_state[order_num].move_to_waste()
             self.terminate_delivery(order_num)
 
-        self.logger.debug(
-            f"order {order_num} details: {self.orders_state[order_num]}")
+            self.logger.debug(
+                f"order {order_num} details: {self.orders_state[order_num]}")
 
         return OVERFLOW
 
     def snapshot(self):
         """Dumps the current state of all shelves to logger"""
 
-        counter = self.shelves_count()
+        counter = self.count_shelves()
 
         for shelf in shelf_types + [OVERFLOW, WASTE]:
             count = counter[shelf]
@@ -246,11 +269,8 @@ class Kitchen:
         """Main logic: create new state for the order; dispatch courier"""
 
         with self.lock:
-            # get fresh count of all orders from all shelves
-            count = self.shelves_count()
-
             # find a proper shelf for new order
-            shelf = self.make_room(count, order.temp)
+            shelf = self.make_room(order.temp)
 
             # simulate pickup delay
             delay = random.randint(
@@ -321,7 +341,7 @@ class Kitchen:
         self.cleanup_event.set()
 
         self.logger.warning(
-            f"Stop kitchen: unfinished orders={len(self.unfinished_orders())}")
+            f"Stop kitchen: unfinished orders={len(self.active_orders())}")
 
         wasted = self.shelf_orders(WASTE)
         self.logger.warning(f"Wasted orders count={len(wasted)}")
